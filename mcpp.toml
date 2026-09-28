@@ -72,6 +72,11 @@ main = "src/bin/mockmodel.cpp"
 [toolchain]
 default = "llvm@22.1.8"
 
+# libmc++'s own index (mcpp-safe/index, its rule R2): llvm.clang-dev, which mcxx.clang depends on. Only
+# a workspace root's [indices] is read, so the consumer states it.
+[indices]
+llvm = { path = "../../index/llvm" }
+
 # The platform: openkal beneath musl, libc++ above it. One source builds every target.
 [dependencies]
 openkal-llvm-runtime.workspace = true

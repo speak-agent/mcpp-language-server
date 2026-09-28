@@ -2,7 +2,8 @@ name: mcxx
 
 # The mcxx engine (libmc++ in process, no clangd): build, unit tests, a clangd-free payload, and
 # the linux-x64 fixtures in parallel parts. The checkout is the development layout of MC++:
-# Sunrisepeak/mcpp-safe (libmc++) at the root, this fork and llvm-clang-dev under forks/.
+# Sunrisepeak/mcpp-safe (libmc++) at the root and this fork under forks/; llvm.clang-dev comes from
+# libmc++'s own index (mcpp-safe/index).
 
 on:
   push:
@@ -43,11 +44,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: forks/mcpp-language-server
-      - name: llvm-clang-dev
-        uses: actions/checkout@v4
-        with:
-          repository: speak-agent/llvm-clang-dev
-          path: forks/llvm-clang-dev
       - name: xlings
         run: |
           curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
