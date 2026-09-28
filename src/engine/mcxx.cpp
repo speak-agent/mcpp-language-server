@@ -11,7 +11,7 @@ import mcppls.lsp.protocol;
 import mcppls.normalize.plan;
 import mcppls.engine;
 import mcxx.msa;
-import mcxx.clang;
+import mcxx.backend;
 import mcxx.lsp;
 
 namespace mcppls::engine::mcxx {
@@ -25,7 +25,8 @@ namespace msa = ::mcxx::msa;
 // The requests this engine answers; everything else is left to others or to nobody.
 bool answers(std::string_view method) {
     namespace m = lsp::method;
-    static const std::array<std::string_view, 12> METHODS {
+    static const std::array<std::string_view, 13> METHODS {
+        m::TEXT_DOCUMENT_DIAGNOSTIC,
         m::TEXT_DOCUMENT_DEFINITION,        m::TEXT_DOCUMENT_DECLARATION,     m::TEXT_DOCUMENT_TYPE_DEFINITION,
         m::TEXT_DOCUMENT_IMPLEMENTATION,    m::TEXT_DOCUMENT_HOVER,           m::TEXT_DOCUMENT_REFERENCES,
         m::TEXT_DOCUMENT_DOCUMENT_HIGHLIGHT, m::TEXT_DOCUMENT_DOCUMENT_SYMBOL, m::WORKSPACE_SYMBOL,
@@ -79,12 +80,12 @@ public:
         w.log = [](std::string_view line) { log::info("mcxx: {}", line); };
         auto sink = sink_;
         w.changed = [sink] { sink(Json { { "kind", "changed" } }); };
-        workspace_ = ::mcxx::clang::make_workspace(std::move(w));
+        workspace_ = ::mcxx::backend::make_workspace(std::move(w));
         service_ = std::make_unique<::mcxx::lsp::Service>(*workspace_, ::mcxx::lsp::Options {}, [sink](std::string_view method, Json params) {
             if (method == lsp::method::TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS) sink(Json { { "kind", "diagnostics" }, { "params", std::move(params) } });
         });
         for (unsigned i { 0 }; i < 4; ++i) workers_.emplace_back([this](std::stop_token stop) { work_(stop); });
-        log::info("mcxx engine: libmc++ over clang {}, resource directory {}", ::mcxx::clang::version(),
+        log::info("mcxx engine: {} {}, resource directory {}", backend_.name, backend_.version,
                   options_.resourceDirectory.empty() ? "(none)" : options_.resourceDirectory);
         host.engine_settled(ENGINE_ID, ::mcxx::lsp::Service::capabilities());
     }
@@ -105,7 +106,8 @@ public:
     }
 
     void configure_plan(normalize::PlanInput& input) const override {
-        input.engineDriverDirectory = options_.resourceDirectory.empty() ? std::string {} : base::parent_path(base::parent_path(base::parent_path(options_.resourceDirectory)));
+        // Only a name for argv[0] of synthesized commands: the builtin headers are passed by path.
+        input.engineDriverDirectory = options_.resourceDirectory.empty() ? std::string {} : base::join_path(base::parent_path(options_.resourceDirectory), "bin");
         input.primeDirectory.clear();
         input.moduleHintDirectory.clear();
         input.stubDirectory = stubDirectory_;
@@ -149,7 +151,11 @@ public:
             if (change.contains("uri")) service_->changed_on_disk(host_->engine_uri(change["uri"].get<std::string>()));
     }
 
-    void sources_changed() override {}
+    // Sources or build descriptions changed on disk: what is open is read again (a changed interface
+    // is rebuilt when an importer's parse requires it).
+    void sources_changed() override {
+        if (service_) post_([this] { service_->refresh(); });
+    }
 
     bool claims(const RequestView& request) const override { return service_ && answers(request.method); }
 
@@ -233,7 +239,8 @@ private:
     };
 
     Options options_;
-    std::string version_ { std::format("{} (libmc++ over clang {})", base::VERSION, ::mcxx::clang::version()) };
+    msa::BackendInfo backend_ { ::mcxx::backend::info() };
+    std::string version_ { std::format("{} ({} {})", base::VERSION, backend_.name, backend_.version) };
     std::vector<MethodCapability> methods_ { { std::string { EVERY_METHOD }, Role::answer, 0 } };
     Host* host_ { nullptr };
     std::function<void(Json)> sink_;
@@ -276,15 +283,17 @@ private:
 } // namespace
 
 std::string resource_directory(std::string_view payloadDirectory, std::string_view clangd) {
-    const std::string major { "23" };
+    // The payload's own: the backend's builtin headers under mcxx/resource/include.
     if (!payloadDirectory.empty()) {
-        const std::string own { base::join_path(base::join_path(std::string { payloadDirectory }, "mcxx/lib/clang"), major) };
+        const std::string own { base::join_path(std::string { payloadDirectory }, "mcxx/resource") };
         if (fs::is_directory(base::join_path(own, "include"))) return own;
     }
     if (const auto named = platform::env::get("MCPPLS_MCXX_RESOURCE_DIR"); named && !named->empty()) return *named;
+    // A payload of the clangd engine (transitional): the builtin headers that ship beside its clangd.
     if (!clangd.empty()) {
-        const std::string beside { base::join_path(base::join_path(base::parent_path(base::parent_path(clangd)), "lib/clang"), major) };
-        if (fs::is_directory(base::join_path(beside, "include"))) return beside;
+        const std::string lib { base::join_path(base::parent_path(base::parent_path(clangd)), "lib/clang") };
+        for (const auto& entry : fs::list_directory(lib))
+            if (fs::is_directory(base::join_path(entry, "include"))) return entry;
     }
     return {};
 }
