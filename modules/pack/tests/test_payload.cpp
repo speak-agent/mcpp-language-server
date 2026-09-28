@@ -1,5 +1,5 @@
-// mcppls.pack.payload ports assemble_payload.py: assembling the <payload>/ layout from a server, a
-// trimmed clangd and a semantic kit, verifying one, and copying an already-assembled one (--from).
+// mcppls.pack.payload ports assemble_payload.py: assembling the <payload>/ layout from a server, the
+// mcxx engine's builtin headers, optionally a trimmed clangd, and a semantic kit, verifying one, and copying an already-assembled one (--from).
 //
 // The fixtures here stand in for what mcppls.pack.clangd::trim and the kit recipe (ported
 // separately) would actually produce -- just enough of each part's shape for every one of
@@ -85,9 +85,20 @@ std::string make_kit_directory(const std::string& root, std::string_view name = 
     return dir;
 }
 
+// The mcxx engine's builtin headers, shaped like mcppls.pack.resource::stage's output.
+std::string make_resource_directory(const std::string& root) {
+    const std::string dir { base::join_path(root, std::format("mcxx-resource-{}", std::random_device {}())) };
+    put(base::join_path(dir, "include/stddef.h"), "typedef long ptrdiff_t;");
+    put(base::join_path(dir, "LICENSE.TXT"), "Apache-2.0 WITH LLVM-exception");
+    return dir;
+}
+
+std::string resourceDirectory;   // one for every test case, made in main
+
 lock::Lock lock_with_clangd_version(std::string version = "23.1.0") {
     lock::Lock lockData {};
     lockData.clangdVersion = std::move(version);
+    lockData.libcxxVersion = "23.1.0";
     for (const std::string_view platform : { "linux-x64", "linux-arm64", "darwin-arm64", "win32-x64" }) {
         lockData.platforms.emplace(std::string { platform }, lock::Platform {});
     }
@@ -101,6 +112,7 @@ payload::AssembleOptions options_for(const std::string& work, std::string_view p
     return payload::AssembleOptions {
         .platform = std::string { platform },
         .serverPath = server,
+        .resourceDirectory = resourceDirectory,
         .clangdDirectory = clangdDir,
         .kitDirectory = kitDir,
         .outDirectory = out,
@@ -124,6 +136,21 @@ int main(int argc, char* argv[]) {
     const std::string server { base::join_path(work, "mcppls-fixture") };
     put(server, "#!/bin/sh\necho mcppls\n");
     const auto lockData = lock_with_clangd_version();
+    resourceDirectory = make_resource_directory(work);
+
+    "a payload for the mcxx engine alone carries no clangd and verifies clean"_test = [&] {
+        const std::string kitDir { make_kit_directory(work) };
+        const std::string out { base::join_path(work, "payload-mcxx") };
+        auto assembled = payload::assemble(options_for(work, "linux-x64", server, std::string {}, kitDir, out, repoRoot), lockData);
+        expect(fatal(assembled.has_value())) << (assembled ? std::string {} : assembled.error().message);
+        if (!assembled) return;
+        expect(!fs::exists(base::join_path(*assembled, "clangd")));
+        expect(fs::is_regular_file(base::join_path(*assembled, "mcxx/resource/include/stddef.h")));
+        expect(fs::is_regular_file(base::join_path(*assembled, "licenses/LLVM-LICENSE.TXT")));
+        auto problems = payload::verify(*assembled);
+        for (const auto& problem : problems) std::println(std::cerr, "  verify problem: {}", problem);
+        expect(problems.empty());
+    };
 
     "a well-formed assemble produces a payload that verifies clean"_test = [&] {
         const std::string clangdDir { make_clangd_directory(work, "linux-x64") };

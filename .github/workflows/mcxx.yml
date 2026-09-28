@@ -1,0 +1,181 @@
+name: mcxx
+
+# The mcxx engine (libmc++ in process, no clangd): build, unit tests, a clangd-free payload, and
+# the linux-x64 fixtures in parallel parts. The checkout is the development layout of MC++:
+# Sunrisepeak/mcpp-safe (libmc++) at the root, this fork and llvm-clang-dev under forks/.
+#
+# mcpp-safe is private: MCPP_SAFE_TOKEN is a token that can read it.
+
+on:
+  push:
+    branches: [mcxx-engine]
+  pull_request:
+    branches: [mcxx-engine]
+  workflow_dispatch:
+    inputs:
+      mcpp-safe-ref:
+        description: The libmc++ (Sunrisepeak/mcpp-safe) ref to build against
+        default: main
+
+concurrency:
+  group: mcxx-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XLINGS_NON_INTERACTIVE: '1'
+  XLINGS_VERSION: v2026.8.17.2
+  MCPP_VERSION: 2026.9.28.2
+  LLVM_VERSION: 22.1.8
+  FORK: forks/mcpp-language-server
+
+jobs:
+  build:
+    name: build, unit tests and payload (linux-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+          token: ${{ secrets.MCPP_SAFE_TOKEN }}
+      - name: This fork
+        uses: actions/checkout@v4
+        with:
+          path: forks/mcpp-language-server
+      - name: llvm-clang-dev
+        uses: actions/checkout@v4
+        with:
+          repository: speak-agent/llvm-clang-dev
+          path: forks/llvm-clang-dev
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.mcpp/registry/data/xpkgs
+          key: mcxx-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+          restore-keys: mcxx-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: bash "$FORK/.github/scripts/install-mcpp.sh"
+      - name: Tools for the kit configure
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build libc6-dev linux-libc-dev
+      - name: libmc++ unit tests
+        run: mcpp test -p modules/graph
+      - name: Build
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          mcpp build -j auto
+          mcpp build -p devtools -j auto
+          mkdir -p stage
+          for exe in mcppls mcppls-conformance mcppls-mock-mcpp mcppls-mock-model mcppls-devtools; do
+            cp "$(find target tools/devtools/target -type f -name "$exe" -path '*/bin/*' | head -1)" stage/
+          done
+          stage/mcppls version
+      - name: Unit tests
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          mcpp test
+          mcpp test --workspace
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FORK }}/.payload-cache
+          key: payload-inputs-linux-x64-${{ hashFiles('forks/mcpp-language-server/packaging/payload.lock.json') }}
+      - name: A payload without clangd
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          stage/mcppls-devtools payload --server stage/mcppls --out payload --cache .payload-cache
+          stage/mcppls-devtools payload --verify payload
+          test ! -e payload/clangd
+          tar -czf mcxx-linux-x64.tar.gz payload stage
+          du -sh payload/* mcxx-linux-x64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcxx-linux-x64
+          path: ${{ env.FORK }}/mcxx-linux-x64.tar.gz
+          retention-days: 7
+
+  conformance:
+    name: conformance (linux-x64, part ${{ matrix.part }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Four parts balanced on measured times (about 150 s of fixtures each).
+        include:
+          - part: 1
+            fixtures: clangd-cannot-load clangd-crash-context cmake-clang compdb-rejected-command diagnostic-bundle failure-at-base generated-module-old-mcpp@neovim inferred inferred-bom mcpp-emit-package-std mcpp-emit-provisioned mcpp-emit-watch@polling mcpp-gcc@plain typing-autosave typing-import typing-import-spin workaround-canaries
+          - part: 2
+            fixtures: compdb-mixed-standards completion-keywords inferred-cxx26 mcpp-emit-broken mcpp-emit-watch mcpp-llvm mcpp-rules-generated mcpp-split mcpp-watch mingw module-faults@zed s1-two-sets watch-polling
+          - part: 3
+            fixtures: build-discovery-off compdb-lto-msvc failure-at-base@vscode generated-module@vscode mcpp-emit mcpp-emit-hang mcpp-emit-needs-download mcpp-emit-partial mcpp-emit-wait mcpp-gcc mcpp-watch@polling multi-root payload-corrupt untrusted
+          - part: 4
+            fixtures: cmake-clang-bdb cmake-fetchcontent-offline engine-none failure-at-base@neovim generated-module generated-module-negotiated generated-module-old-mcpp mcpp-all-cppm mcpp-emit-partial-download mcpp-emit-unavailable mcpp-partition-definition mcpp-split-gcc module-faults verify-changes
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.mcpp/registry/data/xpkgs
+          key: mcxx-fixtures-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ matrix.part }}
+          restore-keys: mcxx-fixtures-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: bash .github/scripts/install-mcpp.sh
+      - name: Toolchains the fixtures build with
+        run: |
+          set -euo pipefail
+          case " ${{ matrix.fixtures }} " in *" mcpp-gcc"*|*" mcpp-split-gcc "*|*" mingw "*) mcpp toolchain install gcc 16.1.0 ;; esac
+          sudo apt-get update -q && sudo apt-get install -y -q ninja-build
+      - name: CMake 4.4.2 (cmake-clang-bdb)
+        if: contains(matrix.fixtures, 'cmake-clang-bdb')
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cmake-4.4.2"
+          curl -sfL https://github.com/Kitware/CMake/releases/download/v4.4.2/cmake-4.4.2-linux-x86_64.tar.gz | tar -xz -C "$RUNNER_TEMP/cmake-4.4.2" --strip-components 1
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-linux-x64
+      - name: Unpack
+        run: tar -xzf mcxx-linux-x64.tar.gz && ls payload stage
+      - name: Run the fixtures
+        run: |
+          set -euo pipefail
+          export CONFORMANCE_CLANGXX="$HOME/.mcpp/registry/data/xpkgs/xim-x-llvm/$LLVM_VERSION/bin/clang++"
+          failed=()
+          for spec in ${{ matrix.fixtures }}; do
+            name=${spec%@*}; extra=()
+            case "$spec" in
+              watch-polling|*@polling) extra+=(--no-dynamic-watch) ;;
+              *@plain) extra+=(--plain-client) ;;
+              *@vscode) extra+=(--client vscode) ;;
+              *@neovim) extra+=(--client neovim) ;;
+              *@zed) extra+=(--client zed) ;;
+            esac
+            prefix=''
+            [ "$name" = cmake-clang-bdb ] && prefix="$RUNNER_TEMP/cmake-4.4.2/bin:"
+            echo "::group::$spec"
+            if ! PATH="$prefix$PATH" stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload \
+                   --fixture "conformance/fixtures/$name" --timeout 180 ${extra[@]+"${extra[@]}"}; then
+              failed+=("$spec")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi

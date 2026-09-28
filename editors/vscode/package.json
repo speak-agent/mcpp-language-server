@@ -206,14 +206,16 @@
         "mcppls.engine": {
           "type": "string",
           "enum": [
+            "mcxx",
             "clangd",
             "none"
           ],
           "enumDescriptions": [
-            "The built-in clangd provides C++ semantics; mcppls's own engine answers module-level requests.",
+            "libmc++ in process (Clang 23.1 as a library, no clangd) provides C++ semantics; mcppls's own engine answers module-level requests.",
+            "A clangd process provides C++ semantics; mcppls's own engine answers module-level requests.",
             "No core engine: only mcppls's own module-level features (module navigation, import completion, module diagnostics)."
           ],
-          "default": "clangd",
+          "default": "mcxx",
           "description": "The core semantic engine. mcppls's own module engine always runs beside it."
         },
         "mcppls.ai.enabled": {

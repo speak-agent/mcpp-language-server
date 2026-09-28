@@ -41,7 +41,7 @@ VS Code 扩展已经会这样做）；`重新加载模型` 只重新加载项目
 
 | 设置 | 取值 | 默认值 | 命令行 | 生效方式 | 作用 |
 |---|---|---|---|---|---|
-| `mcppls.engine` | `clangd`, `none` | `clangd` | `--engine` | 重启 | 核心引擎。无论如何，mcppls 自己的模块引擎都会运行；`none` 表示只提供模块相关功能。 |
+| `mcppls.engine` | `mcxx`, `clangd`, `none` | `mcxx` | `--engine` | 重启 | 核心引擎：`mcxx` 为进程内的 libmc++（以库的方式使用 Clang 23.1，不需要 clangd），`clangd` 驱动一个 clangd 进程。无论如何，mcppls 自己的模块引擎都会运行；`none` 表示只提供模块相关功能。 |
 | `mcppls.compiler` | 字符串 | （空） | `--compiler` | 重新加载模型 | 为模块语义使用这个编译器，而不是检测到的那个：可以是绝对路径、`PATH` 上的名字，或 `kit`（强制使用内置的语义工具包）。空表示自动检测。 |
 | `mcppls.semanticKit` | `auto`, `off` | `auto` | `--semantic-kit` | 重新加载模型 | 内置的标准库工具包是否可以被使用：`auto` 在没有找到编译器时使用；`off` 从不使用（没有编译器时只剩模块相关功能）。 |
 | `mcppls.requestTimeout` | 非负整数（秒） | `60` | `--request-timeout` | 重启 | 一个引擎请求最多等待多久，超时后不经该引擎就给出答复。用户在等的请求（悬停、跳转、补全等）总共最多等 30 秒，clangd 启动或准备模块期间也算在内，之后由 mcppls 自己的引擎答复。 |
