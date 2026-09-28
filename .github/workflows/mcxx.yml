@@ -3,14 +3,11 @@ name: mcxx
 # The mcxx engine (libmc++ in process, no clangd): build, unit tests, a clangd-free payload, and
 # the linux-x64 fixtures in parallel parts. The checkout is the development layout of MC++:
 # Sunrisepeak/mcpp-safe (libmc++) at the root, this fork and llvm-clang-dev under forks/.
-#
-# mcpp-safe is private: MCPP_SAFE_TOKEN is a token that can read it.
 
 on:
   push:
     branches: [mcxx-engine]
   pull_request:
-    branches: [mcxx-engine]
   workflow_dispatch:
     inputs:
       mcpp-safe-ref:
@@ -42,7 +39,6 @@ jobs:
         with:
           repository: Sunrisepeak/mcpp-safe
           ref: ${{ inputs.mcpp-safe-ref || 'main' }}
-          token: ${{ secrets.MCPP_SAFE_TOKEN }}
       - name: This fork
         uses: actions/checkout@v4
         with:
