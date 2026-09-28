@@ -87,7 +87,11 @@ mcppls-platform                = { path = "modules/platform" }
 # backend facade; which front end answers is libmc++'s business.
 # During development this fork lives in mcpp-safe/forks/; the MC++ local index later.
 mcxx-msa                       = { path = "../../modules/msa" }
-mcxx-backend                   = { path = "../../modules/backend" }
+mcxx-backend                   = { path = "../../modules/backend/semantic" }
+# MC++'s plugins, linked in: the editor shows the same feature gates and [[mcpp::cfg]] a compile by
+# mcxx applies (A1.4.2).
+mcxx-plugins-std               = { path = "../../plugins/std" }
+mcxx-plugins-libs              = { path = "../../plugins/libs" }
 mcxx-lsp                       = { path = "../../modules/lsp" }
 
 [dependencies.nlohmann]
