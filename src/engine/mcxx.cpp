@@ -26,8 +26,9 @@ namespace msa = ::mcxx::msa;
 // The requests this engine answers; everything else is left to others or to nobody.
 bool answers(std::string_view method) {
     namespace m = lsp::method;
-    static const std::array<std::string_view, 14> METHODS {
+    static const std::array<std::string_view, 16> METHODS {
         "textDocument/symbolInfo",   // clangd's extension, which mcppls's queries use
+        "textDocument/prepareCallHierarchy", "callHierarchy/outgoingCalls",
         m::TEXT_DOCUMENT_DIAGNOSTIC,
         m::TEXT_DOCUMENT_DEFINITION,        m::TEXT_DOCUMENT_DECLARATION,     m::TEXT_DOCUMENT_TYPE_DEFINITION,
         m::TEXT_DOCUMENT_IMPLEMENTATION,    m::TEXT_DOCUMENT_HOVER,           m::TEXT_DOCUMENT_REFERENCES,
@@ -170,7 +171,12 @@ public:
                 if (fs::read_file(file).value_or("") != content) (void)fs::write_file(file, content);
             workspace_->set_commands(std::move(commands));
             service_->refresh();
+            sink_(Json { { "kind", "applied" } });
         });
+        // From here until libmc++ has the commands, the index counts as being built: a query that
+        // waits for the index must not find it idle in between.
+        ++pendingPlans_;
+        update_index_progress_();
     }
 
     void document(const DocumentEvent& event) override {
@@ -211,6 +217,8 @@ public:
         Json params = request.params != nullptr ? *request.params : (message.contains("params") ? message["params"] : Json::object());
         if (params.contains("textDocument") && params["textDocument"].contains("uri"))
             params["textDocument"]["uri"] = host_->engine_uri(params["textDocument"]["uri"].get<std::string>());
+        if (params.contains("item") && params["item"].is_object() && params["item"].contains("uri"))
+            params["item"]["uri"] = host_->engine_uri(params["item"]["uri"].get<std::string>());
         auto stop = std::make_shared<std::stop_source>();
         log::debug("mcxx: request {} {} {}", request.method, key, params.contains("textDocument") ? params["textDocument"].dump() : std::string {});
         pending_[key] = Pending { std::move(reply), stop };
@@ -255,6 +263,9 @@ public:
             std::optional<std::int64_t> version;
             if (params.contains("version") && params["version"].is_number_integer()) version = params["version"].get<std::int64_t>();
             host_->publish_engine_diagnostics(ENGINE_ID, clientUri, std::move(diagnostics), version);
+        } else if (kind == "applied") {
+            if (pendingPlans_ > 0) --pendingPlans_;
+            update_index_progress_();
         } else if (kind == "changed") {
             host_->status_changed();
             update_index_progress_();
@@ -299,6 +310,7 @@ private:
     std::uint64_t generation_ { 0 };   // plans applied
     std::string progressToken_;        // non-empty while the index's $/progress is open
     int progressPercent_ { -1 };
+    int pendingPlans_ { 0 };           // plans applied that libmc++ has not taken yet
     std::uint64_t progressTokens_ { 0 };
 
     // The program index being built, as standard `$/progress` every editor shows (and mcppls's own
@@ -307,7 +319,7 @@ private:
         const Json* supported { lsp::find_path(host_->client_initialize_params(), { "capabilities", "window", "workDoneProgress" }) };
         if (supported == nullptr || !supported->is_boolean() || !supported->get<bool>() || !workspace_) return;
         const msa::Status w { workspace_->status() };
-        const bool indexing { w.busy && w.units > 0 && w.indexed < w.units };
+        const bool indexing { pendingPlans_ > 0 || (w.busy && w.units > 0 && w.indexed < w.units) };
         if (!indexing) {
             if (progressToken_.empty()) return;
             host_->send_to_client(lsp::make_notification("$/progress", Json { { "token", progressToken_ }, { "value", Json { { "kind", "end" } } } }));
@@ -315,7 +327,7 @@ private:
             progressPercent_ = -1;
             return;
         }
-        const int percent { static_cast<int>(w.indexed * 100 / w.units) };
+        const int percent { w.units > 0 ? static_cast<int>(std::min(w.indexed, w.units) * 100 / w.units) : 0 };
         const std::string message { std::format("{}/{} units", w.indexed, w.units) };
         if (progressToken_.empty()) {
             progressToken_ = std::format("mcxx/index/{}", ++progressTokens_);

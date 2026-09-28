@@ -80,10 +80,10 @@ mcppls-base                    = { path = "modules/base" }
 mcppls-platform                = { path = "modules/platform" }
 # libmc++ (MC++, Sunrisepeak/mcpp-safe): the mcxx engine in process -- MSA, its LSP service and the
 # backend facade; which front end answers is libmc++'s business.
-# A sibling checkout during development; the MC++ local index later.
-mcxx-msa                       = { path = "../mcpp-safe/modules/msa" }
-mcxx-backend                   = { path = "../mcpp-safe/modules/backend" }
-mcxx-lsp                       = { path = "../mcpp-safe/modules/lsp" }
+# During development this fork lives in mcpp-safe/forks/; the MC++ local index later.
+mcxx-msa                       = { path = "../../modules/msa" }
+mcxx-backend                   = { path = "../../modules/backend" }
+mcxx-lsp                       = { path = "../../modules/lsp" }
 
 [dependencies.nlohmann]
 json.workspace = true
