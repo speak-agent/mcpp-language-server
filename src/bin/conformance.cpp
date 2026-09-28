@@ -257,6 +257,16 @@ std::map<std::string, std::string> snapshot(const std::string& root) {
     return files;
 }
 
+// libmc++ (the mcxx engine) keeps a module's interface as <cache>/mcxx/modules/<module>-<16 hex digits>.pcm,
+// the digits a key of what it was built from; a rebuild with other inputs is another file.
+bool is_mcxx_module_file(const std::string& path, std::string_view published) {
+    const std::string name { base::file_name(path) };
+    const std::string_view stem { published.substr(0, published.size() - 4) };
+    if (base::file_name(base::parent_path(path)) != "modules" || base::file_name(base::parent_path(base::parent_path(path))) != "mcxx") return false;
+    if (name.size() != stem.size() + 1 + 16 + 4 || !name.starts_with(stem) || name[stem.size()] != '-' || !name.ends_with(".pcm")) return false;
+    return std::ranges::all_of(name.substr(stem.size() + 1, 16), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) != 0; });
+}
+
 // The engine's published module files for a module under a cache directory, with their stamps. clangd
 // publishes <module>.pcm (a partition as <module>-<partition>.pcm) under a directory per source and
 // command; the copies it hands to readers carry a timestamp in their names and are not included.
@@ -273,7 +283,7 @@ std::map<std::string, std::string> module_files(const std::string& cacheDirector
         for (const auto& entry : fs::list_directory(directory)) {
             if (fs::is_directory(entry)) {
                 pending.push_back(entry);
-            } else if (base::file_name(entry) == published) {
+            } else if (base::file_name(entry) == published || is_mcxx_module_file(entry, published)) {
                 const auto stamp = fs::stamp(entry);
                 files[entry] = stamp ? std::format("{}:{}", stamp->size, stamp->modified) : std::string {};
             }

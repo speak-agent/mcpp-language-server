@@ -12,6 +12,7 @@ import mcppls.engine.payload;
 import mcppls.engine.native;
 import mcppls.engine.native.index;
 import mcppls.engine.clangd;
+import mcppls.engine.mcxx;
 import mcppls.orchestrator.workspace;
 import mcppls.ai.model.source;
 
@@ -25,6 +26,14 @@ orchestrator::EngineFactories engine_factories(const orchestrator::SessionOption
     const engine::native::TokenOptions tokenOptions { options.semanticTokensModules, options.semanticTokensModuleType };
     factories.modules = [tokenOptions](const index::ModuleIndex& index) { return engine::native::make_engine(index, tokenOptions); };
     if (options.engine == "none") return factories;
+    if (options.engine == "mcxx") {
+        factories.core = [payload]() -> std::unique_ptr<engine::Engine> {
+            engine::mcxx::Options mcxx;
+            mcxx.resourceDirectory = engine::mcxx::resource_directory(payload.directory, payload.clangd);
+            return engine::mcxx::make_engine(std::move(mcxx));
+        };
+        return factories;
+    }
     if (options.engine != "clangd") base::log::warning("unknown engine {}; using clangd", options.engine);
     factories.core = [options, payload, payloadCorrupt]() -> std::unique_ptr<engine::Engine> {
         engine::clangd::Options clangd;

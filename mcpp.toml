@@ -22,7 +22,7 @@ members = [
 
 # One version of each third-party package for every member.
 [workspace.dependencies]
-openkal-llvm-runtime = "0.15.1"
+openkal-llvm-runtime = "0.15.2"
 cmdline              = "0.0.2"
 tinyhttps            = "0.3.1"
 
@@ -78,6 +78,11 @@ openkal-llvm-runtime.workspace = true
 cmdline.workspace              = true
 mcppls-base                    = { path = "modules/base" }
 mcppls-platform                = { path = "modules/platform" }
+# libmc++ (MC++, Sunrisepeak/mcpp-safe): the mcxx engine, Clang 23.1 as a library in process.
+# A sibling checkout during development; the MC++ local index later.
+mcxx-msa                       = { path = "../mcpp-safe/modules/msa" }
+mcxx-clang                     = { path = "../mcpp-safe/modules/clang" }
+mcxx-lsp                       = { path = "../mcpp-safe/modules/lsp" }
 
 [dependencies.nlohmann]
 json.workspace = true
