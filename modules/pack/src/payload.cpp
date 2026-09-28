@@ -164,7 +164,7 @@ constexpr std::array<std::string_view, 9> PROGRAM_SUFFIXES {
 
 // S4 section 4: what a kit may contain, checked on the assembled files.
 std::vector<std::string> kit_problems(const std::string& kitDir, const nlohmann::json& kit,
-                                      std::string_view platformName, const std::string& clangdVersion) {
+                                      std::string_view platformName, const std::string& engineStdlib, std::string_view engineName) {
     std::vector<std::string> problems;
     std::error_code failed;
     auto it = std::filesystem::recursive_directory_iterator(kitDir, failed);
@@ -197,9 +197,9 @@ std::vector<std::string> kit_problems(const std::string& kitDir, const nlohmann:
     }
     const auto stdlib = kit.value("stdlib", nlohmann::json::object());
     // Rule 3: a libc++ kit describes the headers of the engine it ships with.
-    if (stdlib.value("name", std::string {}) == "libc++" && stdlib.value("version", std::string {}) != clangdVersion) {
-        problems.push_back(std::format("S4-4-5: libc++ {} in the kit, clangd {} in the payload",
-                                       stdlib.value("version", std::string {}), clangdVersion));
+    if (stdlib.value("name", std::string {}) == "libc++" && stdlib.value("version", std::string {}) != engineStdlib) {
+        problems.push_back(std::format("S4-4-5: libc++ {} in the kit, {} reads libc++ {}",
+                                       stdlib.value("version", std::string {}), engineName, engineStdlib));
     }
     // Rule 4: a macOS kit declares the SDK it needs.
     if (platformName.starts_with("darwin")) {
@@ -220,8 +220,12 @@ base::Result<std::string> assemble(const AssembleOptions& options, const lock::L
     if (!fs::is_regular_file(options.serverPath)) {
         return base::fail("payload-missing", std::format("--server {} does not exist", options.serverPath));
     }
-    if (!fs::is_directory(options.clangdDirectory)) {
+    const bool withClangd { !options.clangdDirectory.empty() };
+    if (withClangd && !fs::is_directory(options.clangdDirectory)) {
         return base::fail("payload-missing", std::format("--clangd {} does not exist", options.clangdDirectory));
+    }
+    if (!fs::is_regular_file(base::join_path(options.resourceDirectory, "include/stddef.h"))) {
+        return base::fail("payload-missing", std::format("the mcxx resource {} has no include/stddef.h", options.resourceDirectory));
     }
     if (!fs::is_directory(options.kitDirectory)) {
         return base::fail("payload-missing", std::format("--kit {} does not exist", options.kitDirectory));
@@ -242,7 +246,7 @@ base::Result<std::string> assemble(const AssembleOptions& options, const lock::L
     }
     const std::string exe { suffix(options.platform) };
     const std::string clangdBinary { base::join_path(options.clangdDirectory, "bin/clangd" + exe) };
-    if (!fs::is_regular_file(clangdBinary)) {
+    if (withClangd && !fs::is_regular_file(clangdBinary)) {
         return base::fail("payload-missing", std::format("{} has no bin/clangd{}; is it trimmed for {}?",
                                                           options.clangdDirectory, exe, options.platform));
     }
@@ -255,9 +259,14 @@ base::Result<std::string> assemble(const AssembleOptions& options, const lock::L
     if (auto copied = copy_one(options.serverPath, serverTarget); !copied) return std::unexpected { copied.error() };
     if (auto marked = fs::make_executable(std::vector<std::string> { serverTarget }); !marked) return std::unexpected { marked.error() };
 
-    if (auto copied = copy_tree(options.clangdDirectory, base::join_path(out, "clangd"), "LICENSE.TXT"); !copied) return std::unexpected { copied.error() };
-    if (auto marked = fs::make_executable(std::vector<std::string> { base::join_path(out, "clangd/bin/clangd" + exe) }); !marked) {
-        return std::unexpected { marked.error() };
+    if (auto copied = copy_tree(options.resourceDirectory, base::join_path(out, "mcxx/resource"), "LICENSE.TXT"); !copied) {
+        return std::unexpected { copied.error() };
+    }
+    if (withClangd) {
+        if (auto copied = copy_tree(options.clangdDirectory, base::join_path(out, "clangd"), "LICENSE.TXT"); !copied) return std::unexpected { copied.error() };
+        if (auto marked = fs::make_executable(std::vector<std::string> { base::join_path(out, "clangd/bin/clangd" + exe) }); !marked) {
+            return std::unexpected { marked.error() };
+        }
     }
     if (auto copied = copy_tree(options.kitDirectory, base::join_path(out, "kit"), ""); !copied) return std::unexpected { copied.error() };
 
@@ -265,16 +274,18 @@ base::Result<std::string> assemble(const AssembleOptions& options, const lock::L
     if (auto copied = copy_one(base::join_path(options.repositoryRoot, "LICENSE"), base::join_path(out, "licenses/mcppls-LICENSE.txt")); !copied) {
         return std::unexpected { copied.error() };
     }
-    const std::string clangdLicense { base::join_path(options.clangdDirectory, "LICENSE.TXT") };
+    const std::string clangdLicense { base::join_path(withClangd ? options.clangdDirectory : options.resourceDirectory, "LICENSE.TXT") };
     if (!fs::is_regular_file(clangdLicense)) {
-        return base::fail("payload-missing", std::format("{} has no LICENSE.TXT", options.clangdDirectory));
+        return base::fail("payload-missing", std::format("{} does not exist", clangdLicense));
     }
     if (auto copied = copy_one(clangdLicense, base::join_path(out, "licenses/LLVM-LICENSE.TXT")); !copied) return std::unexpected { copied.error() };
 
     // usable plan W9.4: the server compares these at startup (cheap: two small reads and, unless
     // a file changed, a cached hash) and reports payload-corrupt on a mismatch.
     nlohmann::json files = nlohmann::json::object();
-    for (const std::string relative : { std::string { "clangd/bin/clangd" } + exe, std::string { "kit/kit.json" } }) {
+    std::vector<std::string> checked { "kit/kit.json", "mcxx/resource/include/stddef.h" };
+    if (withClangd) checked.push_back("clangd/bin/clangd" + exe);
+    for (const auto& relative : checked) {
         const std::string path { base::join_path(out, relative) };
         auto digest = fetch::digest_of(path);
         if (!digest) return std::unexpected { digest.error() };
@@ -291,9 +302,14 @@ base::Result<std::string> assemble(const AssembleOptions& options, const lock::L
     manifest["payload-version"] = PAYLOAD_VERSION;
     manifest["platform"] = options.platform;
     manifest["server"] = { { "version", serverVersion }, { "path", "bin/mcppls" + exe } };
-    manifest["clangd"] = { { "version", lockData.clangdVersion }, { "path", "clangd/bin/clangd" + exe } };
     manifest["kit"] = kitEntry;
-    manifest["engines"] = { { "clangd", { { "version", lockData.clangdVersion }, { "path", "clangd/bin/clangd" + exe }, { "kit", kitEntry } } } };
+    // The mcxx engine is the server itself: what the payload holds for it is its builtin headers and
+    // the libc++ release they and the kit are (S4-4-5).
+    manifest["engines"] = { { "mcxx", { { "resource", "mcxx/resource" }, { "stdlib", lockData.libcxxVersion }, { "kit", kitEntry } } } };
+    if (withClangd) {
+        manifest["clangd"] = { { "version", lockData.clangdVersion }, { "path", "clangd/bin/clangd" + exe } };
+        manifest["engines"]["clangd"] = { { "version", lockData.clangdVersion }, { "path", "clangd/bin/clangd" + exe }, { "kit", kitEntry } };
+    }
     manifest["files"] = files;
     manifest["build"] = provenance(options.repositoryRoot);
 
@@ -303,7 +319,7 @@ base::Result<std::string> assemble(const AssembleOptions& options, const lock::L
 
     // Only when this host can actually run what it just assembled: a cross-assembled payload's
     // clangd cannot be started here to ask it, and asking would be the wrong question anyway.
-    if (options.platform == mcppls::os::PLATFORM) {
+    if (withClangd && options.platform == mcppls::os::PLATFORM) {
         auto reported = run_capture(base::join_path(out, "clangd/bin/clangd" + exe), { "--version" });
         if (!reported) return std::unexpected { reported.error() };
         if (!reported->contains(lockData.clangdVersion)) {
@@ -347,8 +363,11 @@ std::vector<std::string> verify(std::string_view payloadDirectory) {
     }
     const std::string exe { suffix(platform) };
 
-    for (const auto& [part, expected] : std::vector<std::pair<std::string, std::string>> {
-             { "server", "bin/mcppls" + exe }, { "clangd", "clangd/bin/clangd" + exe } }) {
+    const auto engines = manifest.value("engines", nlohmann::json::object());
+    const bool withClangd { manifest.contains("clangd") || engines.contains("clangd") };
+    std::vector<std::pair<std::string, std::string>> parts { { "server", "bin/mcppls" + exe } };
+    if (withClangd) parts.emplace_back("clangd", "clangd/bin/clangd" + exe);
+    for (const auto& [part, expected] : parts) {
         const auto entry = manifest.value(part, nlohmann::json::object());
         const std::string path { entry.value("path", std::string {}) };
         if (path != expected) problems.push_back(std::format("{}.path is {}, expected {}", part, path, expected));
@@ -363,20 +382,28 @@ std::vector<std::string> verify(std::string_view payloadDirectory) {
         }
     }
 
-    const std::string clangdVersion { manifest.value("clangd", nlohmann::json::object()).value("version", std::string { "0" }) };
-    const std::string major { clangdVersion.substr(0, clangdVersion.find('.')) };
-    needFile(std::format("clangd/lib/clang/{}/include/stddef.h", major), "clang builtin headers");
-
-    const auto engines = manifest.value("engines", nlohmann::json::object());
-    const auto clangdEngine = engines.value("clangd", nlohmann::json::object());
-    const auto clangdPart = manifest.value("clangd", nlohmann::json::object());
-    if (clangdEngine.value("path", std::string {}) != std::format("clangd/bin/clangd{}", exe) ||
-        clangdEngine.value("version", std::string {}) != clangdPart.value("version", std::string {})) {
-        problems.push_back(std::format("engines.clangd is {}, expected the clangd part's path and version", clangdEngine.dump()));
-    }
     const auto kitPart = manifest.value("kit", nlohmann::json::object());
-    if (clangdEngine.value("kit", nlohmann::json::object()) != kitPart) {
-        problems.emplace_back("engines.clangd.kit differs from the kit part");
+    const auto mcxxEngine = engines.value("mcxx", nlohmann::json::object());
+    if (mcxxEngine.value("resource", std::string {}) != "mcxx/resource") {
+        problems.push_back(std::format("engines.mcxx is {}, expected its resource at mcxx/resource", mcxxEngine.dump()));
+    }
+    if (mcxxEngine.value("stdlib", std::string {}).empty()) problems.emplace_back("engines.mcxx.stdlib is empty");
+    if (mcxxEngine.value("kit", nlohmann::json::object()) != kitPart) problems.emplace_back("engines.mcxx.kit differs from the kit part");
+    needFile("mcxx/resource/include/stddef.h", "mcxx builtin headers");
+
+    const auto clangdPart = manifest.value("clangd", nlohmann::json::object());
+    if (withClangd) {
+        const std::string clangdVersion { clangdPart.value("version", std::string { "0" }) };
+        const std::string major { clangdVersion.substr(0, clangdVersion.find('.')) };
+        needFile(std::format("clangd/lib/clang/{}/include/stddef.h", major), "clang builtin headers");
+        const auto clangdEngine = engines.value("clangd", nlohmann::json::object());
+        if (clangdEngine.value("path", std::string {}) != std::format("clangd/bin/clangd{}", exe) ||
+            clangdEngine.value("version", std::string {}) != clangdPart.value("version", std::string {})) {
+            problems.push_back(std::format("engines.clangd is {}, expected the clangd part's path and version", clangdEngine.dump()));
+        }
+        if (clangdEngine.value("kit", nlohmann::json::object()) != kitPart) {
+            problems.emplace_back("engines.clangd.kit differs from the kit part");
+        }
     }
 
     if (kitPart.value("path", std::string {}) != "kit") {
@@ -462,9 +489,12 @@ std::vector<std::string> verify(std::string_view payloadDirectory) {
                     if (!names.contains("std")) problems.emplace_back("the kit's module manifest does not provide std");
                 }
             }
-            const std::string clangdVersionStr { clangdPart.value("version", std::string {}) };
-            auto extra = kit_problems(kitDir, kit, platform, clangdVersionStr);
+            auto extra = kit_problems(kitDir, kit, platform, mcxxEngine.value("stdlib", std::string {}), "the mcxx engine");
             problems.insert(problems.end(), extra.begin(), extra.end());
+            if (withClangd && clangdPart.value("version", std::string {}) != mcxxEngine.value("stdlib", std::string {})) {
+                extra = kit_problems(kitDir, kit, platform, clangdPart.value("version", std::string {}), "clangd");
+                problems.insert(problems.end(), extra.begin(), extra.end());
+            }
         }
     }
 
@@ -472,7 +502,9 @@ std::vector<std::string> verify(std::string_view payloadDirectory) {
     needFile("licenses/LLVM-LICENSE.TXT", "license");
 
     const auto integrityFiles = manifest.value("files", nlohmann::json::object());
-    for (const std::string expected : { std::string { "clangd/bin/clangd" } + exe, std::string { "kit/kit.json" } }) {
+    std::vector<std::string> checkedFiles { "kit/kit.json", "mcxx/resource/include/stddef.h" };
+    if (withClangd) checkedFiles.push_back("clangd/bin/clangd" + exe);
+    for (const auto& expected : checkedFiles) {
         if (!integrityFiles.contains(expected)) problems.push_back(std::format("payload.json \"files\" does not list {}", expected));
     }
     for (const auto& item : integrityFiles.items()) {

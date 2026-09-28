@@ -31,7 +31,7 @@ struct PayloadRequest {
     std::string payloadDirectory;   // --payload
     std::string clangd;             // --clangd
     std::string kit;                // --kit
-    std::string engine { "clangd" };   // the core engine, whose version decides the kit; none: any kit
+    std::string engine { "mcxx" };     // the core engine, whose version decides the kit; none: any kit
 };
 
 // Explicit paths win; then the payload named or enclosing this executable (payload.json's

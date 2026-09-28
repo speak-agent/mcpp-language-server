@@ -10,4 +10,5 @@ export import mcppls.pack.kit;
 export import mcppls.pack.lock;
 export import mcppls.pack.payload;
 export import mcppls.pack.release;
+export import mcppls.pack.resource;
 export import mcppls.pack.targets;

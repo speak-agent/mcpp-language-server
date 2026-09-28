@@ -66,6 +66,10 @@ struct Options {
     // that asks whether the client understands `cxxModules/status`, i.e. only to the one client
     // that already had progress (cold-start plan 4.1).
     bool plainClient { false };
+    // `--core-engine`: the core engine the server under test runs (its default). A fixture's
+    // "engine-name"/"engines-include" of "clangd" predates a choice of core engine and means this
+    // one; "only-engine" names the engines a check (or a whole fixture) holds for.
+    std::string coreEngine { "mcxx" };
     // `--client`: the capabilities a real editor actually sends. `none` (no flag at all) keeps this
     // runner's own long-standing default, the full experimental.cxxModules block with no
     // initializationOptions, so every fixture that predates this option keeps behaving exactly as
@@ -1138,13 +1142,17 @@ public:
                     matched = matched && snapshot.value("profile", Json::object()).value("compiler", std::string {}).starts_with(compiler->get<std::string>());
                 }
                 // overall design 5.2 and 5.6: the core engine, and every engine serving the root.
+                const auto core_name = [&](const Json& named) {
+                    const std::string name { named.get<std::string>() };
+                    return name == "clangd" ? options_.coreEngine : name;
+                };
                 if (auto engineName = check.find("engine-name"); engineName != check.end()) {
-                    matched = matched && snapshot.value("engine", Json::object()).value("name", std::string {}) == engineName->get<std::string>();
+                    matched = matched && snapshot.value("engine", Json::object()).value("name", std::string {}) == core_name(*engineName);
                 }
                 if (auto engines = check.find("engines-include"); engines != check.end()) {
                     for (const auto& wanted : *engines) {
                         matched = matched && std::ranges::any_of(snapshot.value("engines", Json::array()), [&](const Json& engine) {
-                            return engine.value("name", std::string {}) == wanted.get<std::string>();
+                            return engine.value("name", std::string {}) == core_name(wanted);
                         });
                     }
                 }
@@ -1938,6 +1946,12 @@ int run(Options options) {
         fs::remove_all(base::join_path(workspace, "scenario.json"));
     }
     say("fixture {} in {}{}", name, workspace, alreadyPrepared ? " (prepared before)" : "");
+    if (const auto onlyEngine = scenario.find("only-engine"); onlyEngine != scenario.end() && onlyEngine->is_array()) {
+        if (std::ranges::none_of(*onlyEngine, [&](const Json& e) { return e.is_string() && e.get<std::string>() == options.coreEngine; })) {
+            say("SKIP fixture {} (only with {})", name, lsp::dump(*onlyEngine));
+            return 0;
+        }
+    }
 
     const std::string self { absolute(mcppls::platform::env::arguments().front()) };
     // real-project plan RP2.1: an isolated HOME so producer negotiation
@@ -2087,6 +2101,12 @@ int run(Options options) {
         }
         // `only-on`: the operating systems a check holds on ("linux", "macos", "windows"); a defect that shows
         // differently elsewhere (a crash instead of a spin) is checked by its own entry there.
+        if (const auto onlyEngine = check.find("only-engine"); onlyEngine != check.end() && onlyEngine->is_array()) {
+            if (std::ranges::none_of(*onlyEngine, [&](const Json& e) { return e.is_string() && e.get<std::string>() == options.coreEngine; })) {
+                say("SKIP {} {} (only with {})", id, check.value("kind", std::string {}), lsp::dump(*onlyEngine));
+                continue;
+            }
+        }
         if (const auto onlyOn = check.find("only-on"); onlyOn != check.end() && onlyOn->is_array()) {
             const std::string_view here { mcppls::os::FAMILY == mcppls::os::Family::windows ? "windows"
                                           : mcppls::os::FAMILY == mcppls::os::Family::macos ? "macos" : "linux" };
@@ -2260,8 +2280,12 @@ int prepare_payload_corrupt(const std::string& source) {
         return 1;
     }
     if (!manifest.contains("files")) manifest["files"] = Json::object();
-    const std::string clangd { base::join_path(target, "clangd/bin/clangd") };
-    for (const auto& [relative, path] : { std::pair { std::string { "clangd/bin/clangd" }, clangd },
+    // The engine's own file is what is corrupted: clangd's executable in a payload that has one,
+    // else the mcxx engine's builtin headers.
+    const std::string victimRelative { fs::is_regular_file(base::join_path(target, "clangd/bin/clangd")) ? "clangd/bin/clangd"
+                                                                                                         : "mcxx/resource/include/stddef.h" };
+    const std::string victim { base::join_path(target, victimRelative) };
+    for (const auto& [relative, path] : { std::pair { victimRelative, victim },
                                           std::pair { std::string { "kit/kit.json" }, base::join_path(target, "kit/kit.json") } }) {
         if (manifest["files"].contains(relative) || !fs::is_regular_file(path)) continue;
         auto content = fs::read_file(path);
@@ -2273,12 +2297,12 @@ int prepare_payload_corrupt(const std::string& source) {
         return 1;
     }
     // Corrupt it now, after the manifest above was computed from the still-intact file.
-    auto intact = fs::read_file(clangd);
+    auto intact = fs::read_file(victim);
     if (!intact) {
-        say("payload-corrupt: {} has no clangd/bin/clangd", source);
+        say("payload-corrupt: {} has no {}", source, victimRelative);
         return 1;
     }
-    if (auto written = fs::write_file(clangd, std::string_view { *intact }.substr(0, std::min<std::size_t>(1024, intact->size()))); !written) {
+    if (auto written = fs::write_file(victim, std::string_view { *intact }.substr(0, std::min<std::size_t>(intact->size() / 2, 1024))); !written) {
         say("payload-corrupt: {}", written.error().message);
         return 1;
     }
@@ -2727,6 +2751,7 @@ int main(int argc, char* argv[]) {
     (void)runCommand.option("plain-client").help("Alias for --client plain");
     (void)runCommand.option("client").takes_value().help("The capabilities a real editor sends: vscode, neovim, zed or plain (default: this runner's own, the full experimental.cxxModules block)");
     (void)runCommand.option("stress-seed").takes_value().help("Overrides every stress check's own \"seed\" (mcppls-devtools stress --seed)");
+    (void)runCommand.option("core-engine").takes_value().help("The core engine the server runs by default: mcxx (default) or clangd");
     (void)runCommand.option("keep-bundles").takes_value().help("Directory a copy of every diagnostic bundle a bundle check exported is left in");
     (void)runCommand.action([&](const cmdline::ParsedArgs& args) {
         Options options;
@@ -2745,6 +2770,7 @@ int main(int argc, char* argv[]) {
         options.expectWarm = args.is_flag_set("expect-warm");
         options.noDynamicWatch = args.is_flag_set("no-dynamic-watch");
         options.plainClient = args.is_flag_set("plain-client");
+        if (auto core = args.value("core-engine")) options.coreEngine = *core;
         options.keepBundles = args.value("keep-bundles") ? absolute(*args.value("keep-bundles")) : std::string {};
         if (auto clientName = args.value("client")) {
             if (*clientName == "vscode") options.client = Options::ClientProfile::vscode;

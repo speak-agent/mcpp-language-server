@@ -124,7 +124,7 @@
       "timeout": 30
     },
     {
-      "id": "T6-workaround-on",
+      "id": "T6-workaround-on", "only-engine": ["clangd"],
       "kind": "report",
       "expect": [
         {

@@ -13,6 +13,7 @@ import mcppls.pack.kit;
 import mcppls.pack.fetch;
 import mcppls.pack.lock;
 import mcppls.pack.payload;
+import mcppls.pack.resource;
 import mcppls.platform.env;
 import mcppls.platform.fs;
 import mcppls.devtools.common;
@@ -94,13 +95,15 @@ struct Payload {
     bool built { false };
 };
 
-// Fetch -> trim clangd -> build the semantic kit -> assemble, in that order (tooling architecture
-// §4), all in this process. The kit step runs cmake and ninja over the libc++ sources; nothing
-// here runs an interpreter.
+// Fetch -> stage the mcxx engine's builtin headers (and, when asked, trim clangd) -> build the
+// semantic kit -> assemble, in that order (tooling architecture §4), all in this process. The kit
+// step runs cmake and ninja over the libc++ sources; nothing here runs an interpreter. The mcxx
+// engine is the server itself, so a payload needs no clangd; `withClangd` (or a --clangd
+// directory) adds one for the clangd engine.
 Payload assemble_payload(const std::string& root, std::string_view platformName, const std::string& outDirectory,
                          const std::string& clangdDirectory, const std::string& kitDirectory,
                          const std::string& serverPath, const std::string& cacheDirectory,
-                         std::optional<std::string> serverVersion, bool strip) {
+                         std::optional<std::string> serverVersion, bool strip, bool withClangd = false) {
     const std::string work { base::join_path(root, "target/pack") };
     (void) platform::fs::create_directories(work);
 
@@ -110,8 +113,17 @@ Payload assemble_payload(const std::string& root, std::string_view platformName,
         return {};
     }
 
+    const std::string resource { base::join_path(work, "mcxx-resource") };
+    std::println("  staging the mcxx engine's builtin headers ...");
+    auto staged = pack::resource::stage(pack::resource::Options { .outDirectory = resource, .cacheDirectory = cacheDirectory }, *lockData);
+    if (!staged) {
+        std::println(std::cerr, "  staging the builtin headers failed: {}", staged.error().message);
+        return {};
+    }
+    std::println("  mcxx resource: {} files, {:.1f} MB", staged->files, static_cast<double>(staged->totalBytes) / 1e6);
+
     std::string clangd { clangdDirectory };
-    if (clangd.empty()) {
+    if (clangd.empty() && withClangd) {
         clangd = base::join_path(work, "clangd");
         std::println("  trimming clangd for {} ...", platformName);
         auto trimmed = pack::clangd::trim(pack::clangd::Options {
@@ -150,6 +162,7 @@ Payload assemble_payload(const std::string& root, std::string_view platformName,
     auto assembled = pack::payload::assemble(pack::payload::AssembleOptions {
         .platform = std::string { platformName },
         .serverPath = serverPath,
+        .resourceDirectory = resource,
         .clangdDirectory = clangd,
         .kitDirectory = kit,
         .outDirectory = outDirectory,
@@ -338,7 +351,7 @@ int command_payload(const cmdline::ParsedArgs& arguments) {
     const bool strip { !arguments.is_flag_set("no-strip") };
     const auto payload = assemble_payload(root, *platformName, out, arguments.value("clangd").value_or(""),
                                           arguments.value("kit").value_or(""), *server, cache,
-                                          arguments.value("server-version"), strip);
+                                          arguments.value("server-version"), strip, arguments.is_flag_set("with-clangd"));
     if (!payload.built) return 1;
 
     auto problems = pack::payload::verify(payload.directory);
@@ -639,6 +652,7 @@ cmdline::App payload_command(bool& handled, int& status) {
     (void) command.option("kit").takes_value().help("Use this already-built semantic kit directory");
     (void) command.option("cache").takes_value().help("Where fetched inputs are cached (default <root>/.payload-cache)");
     (void) command.option("no-strip").help("Keep clangd's debug symbols instead of stripping it");
+    (void) command.option("with-clangd").help("Also carry clangd, for the clangd engine (the mcxx engine needs none)");
     (void) command.option("only").takes_value().help("clangd: trim clangd alone and stop there");
     (void) command.option("verify").takes_value().value_name("DIR").help("Only check an already-assembled payload");
     (void) command.option("from").takes_value().value_name("DIR").help("Copy an already-assembled payload to --out instead of building one");

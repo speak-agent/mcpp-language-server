@@ -8,6 +8,7 @@ import mcppls.base.version;
 import mcppls.platform.env;
 import mcppls.platform.fs;
 import mcppls.lsp.protocol;
+import mcppls.lsp.jsonrpc;
 import mcppls.normalize.plan;
 import mcppls.engine;
 import mcxx.msa;
@@ -25,7 +26,8 @@ namespace msa = ::mcxx::msa;
 // The requests this engine answers; everything else is left to others or to nobody.
 bool answers(std::string_view method) {
     namespace m = lsp::method;
-    static const std::array<std::string_view, 13> METHODS {
+    static const std::array<std::string_view, 14> METHODS {
+        "textDocument/symbolInfo",   // clangd's extension, which mcppls's queries use
         m::TEXT_DOCUMENT_DIAGNOSTIC,
         m::TEXT_DOCUMENT_DEFINITION,        m::TEXT_DOCUMENT_DECLARATION,     m::TEXT_DOCUMENT_TYPE_DEFINITION,
         m::TEXT_DOCUMENT_IMPLEMENTATION,    m::TEXT_DOCUMENT_HOVER,           m::TEXT_DOCUMENT_REFERENCES,
@@ -51,6 +53,13 @@ public:
 
     EngineStatus status() const override {
         EngineStatus s { .name = std::string { ENGINE_ID }, .version = version_, .role = "core" };
+        if (options_.payloadCorrupt) {
+            s.state = "unavailable";
+            s.failed = true;
+            s.issues.push_back({ "payload-corrupt", "the extension's payload is corrupt or was modified; reinstall the extension", "mcppls.showLogs",
+                                 "environment" });
+            return s;
+        }
         if (!workspace_) {
             s.state = "starting";
             return s;
@@ -62,22 +71,50 @@ public:
         s.preparing = w.busy && s.prepared < s.toPrepare;
         s.state = s.preparing ? "preparing" : "ready";
         if (options_.resourceDirectory.empty())
-            s.issues.push_back({ "engine-resource-missing", "no Clang resource directory: builtin headers will not be found", "", "environment" });
+            s.issues.push_back({ "engine-resource-missing", "no builtin header directory: the backend's own headers will not be found", "", "environment" });
+        if (!w.rejected.empty()) {
+            // The build's commands carry what the backend does not accept: the environment's problem (fix plan F6).
+            s.issues.push_back({ "module-scan-failed",
+                                 std::format("{} rejected the compile command: {} (first seen for {})", backend_.name, w.rejected.front().reason,
+                                             base::file_name(w.rejected.front().file)),
+                                 "mcppls.showLogs", "environment" });
+        }
+        if (std::ranges::any_of(w.failures, [](const msa::ModuleFailure& f) { return !f.command; })) {
+            // A module that does not compile is a problem of the code (import-hang plan §6), told once here and
+            // as a diagnostic on each import of it; nothing about the engine is degraded.
+            const auto root = std::ranges::find_if(w.failures, [](const msa::ModuleFailure& f) { return f.cause == f.module && !f.command; });
+            const msa::ModuleFailure& first { root != w.failures.end() ? *root : w.failures.front() };
+            s.issues.push_back({ "modules-doomed",
+                                 std::format("{} module{} cannot be prepared because {} failed: {}", w.failures.size(), w.failures.size() == 1 ? "" : "s",
+                                             first.module, first.reason),
+                                 "mcppls.showLogs", "code" });
+        }
         return s;
     }
 
     void start(Host& host) override {
         host_ = &host;
         sink_ = host.event_sink(ENGINE_ID);
+        if (options_.payloadCorrupt) {
+            log::error("mcxx engine: the payload is corrupt; not starting");
+            host.engine_settled(ENGINE_ID, Json::object());
+            host.status_changed();
+            return;
+        }
         const std::string cache { base::join_path(host.cache_directory(), "mcxx") };
         stubDirectory_ = base::join_path(cache, "stubs");
+        databaseDirectory_ = base::join_path(host.cache_directory(), "contexts/default/cdb");
         (void)fs::create_directories(cache);
         msa::Workspace::Options w;
         w.cache_directory = cache;
         w.resource_directory = options_.resourceDirectory;
         w.workers = options_.workers;
         w.background_index = options_.backgroundIndex;
-        w.log = [](std::string_view line) { log::info("mcxx: {}", line); };
+        // A module that failed says so in the log at once; everything else the backend does is detail.
+        w.log = [](std::string_view line) {
+            if (line.starts_with("Failed")) log::info("mcxx: {}", line);
+            else log::debug("mcxx: {}", line);
+        };
         auto sink = sink_;
         w.changed = [sink] { sink(Json { { "kind", "changed" } }); };
         workspace_ = ::mcxx::backend::make_workspace(std::move(w));
@@ -121,7 +158,13 @@ public:
         commands.reserve(plan->entries.size());
         for (const auto& e : plan->entries) commands.push_back(msa::Command { e.directory, e.file, e.arguments });
         auto stubs = plan->stubSources;
-        post_([this, commands = std::move(commands), stubs = std::move(stubs)]() mutable {
+        ++generation_;
+        // The database as a compile_commands.json where the clangd engine keeps its own: what a
+        // diagnostic bundle and a person debugging read. libmc++ is given the commands directly.
+        std::string database { normalize::to_compile_commands(*plan, false).dump(2) };
+        post_([this, commands = std::move(commands), stubs = std::move(stubs), database = std::move(database)]() mutable {
+            (void)fs::create_directories(databaseDirectory_);
+            (void)fs::write_file_atomic(base::join_path(databaseDirectory_, "compile_commands.json"), database);
             if (!stubs.empty()) (void)fs::create_directories(stubDirectory_);
             for (const auto& [file, content] : stubs)
                 if (fs::read_file(file).value_or("") != content) (void)fs::write_file(file, content);
@@ -133,7 +176,7 @@ public:
     void document(const DocumentEvent& event) override {
         if (!service_ || event.document.path.empty()) return;
         const std::string uri { host_->engine_uri(event.document.uri) };
-        log::info("mcxx: document {} {} v{}", static_cast<int>(event.change), uri, event.document.version);
+        log::debug("mcxx: document {} {} v{}", static_cast<int>(event.change), uri, event.document.version);
         switch (event.change) {
         case DocumentChange::opened: service_->open(uri, std::string { event.document.text }, event.document.version); break;
         case DocumentChange::changed:
@@ -169,7 +212,7 @@ public:
         if (params.contains("textDocument") && params["textDocument"].contains("uri"))
             params["textDocument"]["uri"] = host_->engine_uri(params["textDocument"]["uri"].get<std::string>());
         auto stop = std::make_shared<std::stop_source>();
-        log::info("mcxx: request {} {} {}", request.method, key, params.contains("textDocument") ? params["textDocument"].dump() : std::string {});
+        log::debug("mcxx: request {} {} {}", request.method, key, params.contains("textDocument") ? params["textDocument"].dump() : std::string {});
         pending_[key] = Pending { std::move(reply), stop };
         post_([this, key, method = std::string { request.method }, params = std::move(params), stop] {
             const auto result = service_->request(method, params, stop->get_token());
@@ -189,7 +232,7 @@ public:
     void handle_event(const Json& event) override {
         const std::string kind { event.value("kind", std::string {}) };
         if (kind == "reply") {
-            log::info("mcxx: reply {} {}", event.value("key", std::string {}), event.dump().substr(0, 300));
+            log::debug("mcxx: reply {} {}", event.value("key", std::string {}), event.dump().substr(0, 300));
             const auto it = pending_.find(event.value("key", std::string {}));
             if (it == pending_.end()) return;
             Reply reply { std::move(it->second.reply) };
@@ -214,6 +257,7 @@ public:
             host_->publish_engine_diagnostics(ENGINE_ID, clientUri, std::move(diagnostics), version);
         } else if (kind == "changed") {
             host_->status_changed();
+            update_index_progress_();
         }
     }
 
@@ -221,11 +265,17 @@ public:
     void handle_timers() override {}
 
     Json report() const override {
-        Json r { { "version", version_ }, { "resourceDirectory", options_.resourceDirectory } };
+        // In process: nothing restarts and no file is ever set aside (the fields a clangd engine reports).
+        Json r { { "version", version_ }, { "resourceDirectory", options_.resourceDirectory }, { "restarts", Json::array() },
+                 { "filesSetAside", Json::array() }, { "generation", generation_ }, { "databaseDirectory", databaseDirectory_ } };
         if (workspace_) {
             const msa::Status s { workspace_->status() };
             Json failures = Json::array();
-            for (const auto& [module, why] : s.failures) failures.push_back(Json { { "module", module }, { "reason", why } });
+            for (const auto& f : s.failures) failures.push_back(Json { { "module", f.module }, { "cause", f.cause }, { "reason", f.reason } });
+            Json files = Json::array();
+            for (const auto& rejected : s.rejected) files.push_back(rejected.file);
+            r["scanFailures"] = Json { { "count", s.commands_rejected }, { "files", std::move(files) },
+                                       { "firstReason", s.rejected.empty() ? std::string {} : s.rejected.front().reason } };
             r["status"] = Json { { "units", s.units }, { "modules", s.modules }, { "modulesReady", s.modules_ready },
                                  { "modulesFailed", s.modules_failed }, { "indexed", s.indexed }, { "busy", s.busy }, { "failures", std::move(failures) } };
         }
@@ -245,6 +295,42 @@ private:
     Host* host_ { nullptr };
     std::function<void(Json)> sink_;
     std::string stubDirectory_;
+    std::string databaseDirectory_;
+    std::uint64_t generation_ { 0 };   // plans applied
+    std::string progressToken_;        // non-empty while the index's $/progress is open
+    int progressPercent_ { -1 };
+    std::uint64_t progressTokens_ { 0 };
+
+    // The program index being built, as standard `$/progress` every editor shows (and mcppls's own
+    // queries wait on): begun when units wait to be indexed, reported by the percent, ended when none do.
+    void update_index_progress_() {
+        const Json* supported { lsp::find_path(host_->client_initialize_params(), { "capabilities", "window", "workDoneProgress" }) };
+        if (supported == nullptr || !supported->is_boolean() || !supported->get<bool>() || !workspace_) return;
+        const msa::Status w { workspace_->status() };
+        const bool indexing { w.busy && w.units > 0 && w.indexed < w.units };
+        if (!indexing) {
+            if (progressToken_.empty()) return;
+            host_->send_to_client(lsp::make_notification("$/progress", Json { { "token", progressToken_ }, { "value", Json { { "kind", "end" } } } }));
+            progressToken_.clear();
+            progressPercent_ = -1;
+            return;
+        }
+        const int percent { static_cast<int>(w.indexed * 100 / w.units) };
+        const std::string message { std::format("{}/{} units", w.indexed, w.units) };
+        if (progressToken_.empty()) {
+            progressToken_ = std::format("mcxx/index/{}", ++progressTokens_);
+            host_->send_to_client(lsp::make_request(host_->client_request_id(ENGINE_ID, 0, Json(progressToken_)), "window/workDoneProgress/create",
+                                                    Json { { "token", progressToken_ } }));
+            host_->send_to_client(lsp::make_notification("$/progress", Json { { "token", progressToken_ },
+                { "value", Json { { "kind", "begin" }, { "title", "indexing" }, { "message", message }, { "percentage", percent }, { "cancellable", false } } } }));
+            progressPercent_ = percent;
+            return;
+        }
+        if (percent == progressPercent_) return;
+        progressPercent_ = percent;
+        host_->send_to_client(lsp::make_notification("$/progress", Json { { "token", progressToken_ },
+            { "value", Json { { "kind", "report" }, { "message", message }, { "percentage", percent } } } }));
+    }
     std::unique_ptr<msa::Workspace> workspace_;
     std::unique_ptr<::mcxx::lsp::Service> service_;
     std::map<std::string, Pending> pending_;   // event loop only
@@ -281,6 +367,8 @@ private:
 };
 
 } // namespace
+
+std::string kit_stdlib_version() { return ::mcxx::backend::info().kit_stdlib_version; }
 
 std::string resource_directory(std::string_view payloadDirectory, std::string_view clangd) {
     // The payload's own: the backend's builtin headers under mcxx/resource/include.

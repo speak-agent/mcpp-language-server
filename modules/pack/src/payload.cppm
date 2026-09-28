@@ -9,7 +9,8 @@
 //     <payload>/
 //       payload.json                  versions and relative paths of the three parts
 //       bin/mcppls[.exe]
-//       clangd/bin/clangd[.exe]
+//       mcxx/resource/include/...     the mcxx engine's builtin headers (mcppls.pack.resource)
+//       clangd/bin/clangd[.exe]        optional: the clangd engine
 //       clangd/lib/clang/<major>/include/...
 //       kit/kit.json + kit data        (spec S4)
 //       licenses/                      mcppls and LLVM license texts
@@ -29,7 +30,8 @@ inline constexpr int PAYLOAD_VERSION { 3 };
 struct AssembleOptions {
     std::string platform;                      // one of the lock's platforms
     std::string serverPath;                    // the mcppls executable built for `platform`
-    std::string clangdDirectory;                // produced by mcppls.pack.clangd::trim
+    std::string resourceDirectory;              // produced by mcppls.pack.resource::stage (the mcxx engine)
+    std::string clangdDirectory;                // produced by mcppls.pack.clangd::trim; empty: no clangd engine
     std::string kitDirectory;                   // produced by mcppls.pack.kit (ported separately)
     std::string outDirectory;                   // replaced if it exists
     std::string repositoryRoot;                 // LICENSE and (best-effort) git provenance live here

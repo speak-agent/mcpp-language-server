@@ -17,11 +17,18 @@ struct Options {
     std::string resourceDirectory;
     unsigned workers { 0 };        // 0: libmc++ decides (a quarter of the hardware threads)
     bool backgroundIndex { true };
+    // The payload failed its integrity check (usable plan W9.4): its headers or kit cannot be
+    // trusted, so the engine answers nothing and says why.
+    bool payloadCorrupt { false };
 };
 
 // Where the resource directory is for a payload rooted at `payloadDirectory` and a clangd at `clangd`.
 std::string resource_directory(std::string_view payloadDirectory, std::string_view clangd);
 
 std::unique_ptr<Engine> make_engine(Options options);
+
+// The standard library release a semantic kit must be for this engine (its backend's own headers'
+// release, e.g. libc++ "23.1.0"); empty: any.
+std::string kit_stdlib_version();
 
 } // namespace mcppls::engine::mcxx

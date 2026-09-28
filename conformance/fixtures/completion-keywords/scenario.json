@@ -215,7 +215,14 @@
         {
           "path": "/roots/0/completion/spaceTrigger/maxMicros",
           "exists": true
-        },
+        }
+      ]
+    },
+    {
+      "id": "R1-keywords-before-the-engine",
+      "only-engine": ["clangd"],
+      "kind": "report",
+      "expect": [
         {
           "path": "/roots/0/completion/keywordsWithoutEngine",
           "at-least": 1

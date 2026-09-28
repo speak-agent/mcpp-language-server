@@ -35,7 +35,7 @@ struct SessionOptions {
     std::string kit;
     std::string mcpp;                      // the mcpp executable for mcpp projects; empty: found on PATH
     std::string database;                  // a workspace's own S1 document, relative to the root (usable plan W9.2)
-    std::string engine { "clangd" };       // the core engine: clangd | none (overall design 5.6)
+    std::string engine { "mcxx" };         // the core engine: mcxx | clangd | none (overall design 5.6)
     bool trusted { true };
     bool discoverCompilers { true };
     // mcppls.buildTool (design 4.4): offline --- the default --- runs the build tool without the

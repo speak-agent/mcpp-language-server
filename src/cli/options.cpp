@@ -27,9 +27,10 @@ orchestrator::EngineFactories engine_factories(const orchestrator::SessionOption
     factories.modules = [tokenOptions](const index::ModuleIndex& index) { return engine::native::make_engine(index, tokenOptions); };
     if (options.engine == "none") return factories;
     if (options.engine == "mcxx") {
-        factories.core = [payload]() -> std::unique_ptr<engine::Engine> {
+        factories.core = [payload, payloadCorrupt]() -> std::unique_ptr<engine::Engine> {
             engine::mcxx::Options mcxx;
             mcxx.resourceDirectory = engine::mcxx::resource_directory(payload.directory, payload.clangd);
+            mcxx.payloadCorrupt = payloadCorrupt;
             return engine::mcxx::make_engine(std::move(mcxx));
         };
         return factories;
