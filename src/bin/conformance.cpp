@@ -379,7 +379,7 @@ public:
     // empty answer — both of which `request` below collapses to `Json(nullptr)`, which is fine for
     // every check that only asks "did it answer", but not for one that counts errors on their own.
     struct RequestOutcome {
-        Json result { nullptr };
+        Json result = nullptr;   // `{ nullptr }` is an array holding null
         bool timedOut { false };
         bool isError { false };
     };
@@ -1087,7 +1087,9 @@ public:
     std::pair<bool, std::string> run_(const Json& check) {
         const std::string kind { check.value("kind", std::string {}) };
         const std::string file { check.value("file", std::string { "src/main.cpp" }) };
-        // A check may bring its own unsaved buffer.
+        // A check may bring its own unsaved buffer; what was published before it is not about it.
+        const int publishedBefore { client_.diagnosticsCount[uri(file)] };
+        const bool ownText { check.contains("text") };
         if (auto text = check.find("text"); text != check.end()) open(file, text->get<std::string>());
         if (kind == "status") {
             // usable plan W9.1: "folder" selects one root's own status in a multi-root fixture
@@ -1449,7 +1451,8 @@ public:
             open(file);
             const std::string documentUri { uri(file) };
             const bool published { client_.wait_for([&] {
-                return client_.diagnosticsCount[documentUri] > 0 && state_of(client_.status) != "preparing" && state_of(client_.status) != "loading";
+                return client_.diagnosticsCount[documentUri] > (ownText ? publishedBefore : 0) && state_of(client_.status) != "preparing"
+                       && state_of(client_.status) != "loading";
             }, timeout_) };
             client_.drain(std::chrono::milliseconds { 1500 });
             Json errors = Json::array();

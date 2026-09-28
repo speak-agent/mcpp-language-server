@@ -111,10 +111,14 @@ public:
         w.resource_directory = options_.resourceDirectory;
         w.workers = options_.workers;
         w.background_index = options_.backgroundIndex;
-        // A module that failed says so in the log at once; everything else the backend does is detail.
-        w.log = [](std::string_view line) {
-            if (line.starts_with("Failed")) log::info("mcxx: {}", line);
-            else log::debug("mcxx: {}", line);
+        // libmc++ says how much each line matters (a failure is info or above; MCXX_LOG widens the rest).
+        w.log = [](msa::LogLevel level, std::string_view category, std::string_view message) {
+            switch (level) {
+            case msa::LogLevel::debug: log::debug("mcxx {}: {}", category, message); break;
+            case msa::LogLevel::info: log::info("mcxx {}: {}", category, message); break;
+            case msa::LogLevel::warning: log::warning("mcxx {}: {}", category, message); break;
+            case msa::LogLevel::error: log::error("mcxx {}: {}", category, message); break;
+            }
         };
         auto sink = sink_;
         w.changed = [sink] { sink(Json { { "kind", "changed" } }); };
@@ -287,6 +291,9 @@ public:
             for (const auto& rejected : s.rejected) files.push_back(rejected.file);
             r["scanFailures"] = Json { { "count", s.commands_rejected }, { "files", std::move(files) },
                                        { "firstReason", s.rejected.empty() ? std::string {} : s.rejected.front().reason } };
+            Json counters = Json::object();
+            for (const auto& [name, value] : s.counters) counters[name] = value;
+            r["counters"] = std::move(counters);
             r["status"] = Json { { "units", s.units }, { "modules", s.modules }, { "modulesReady", s.modules_ready },
                                  { "modulesFailed", s.modules_failed }, { "indexed", s.indexed }, { "busy", s.busy }, { "failures", std::move(failures) } };
         }

@@ -44,6 +44,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: forks/mcpp-language-server
+      - name: Source rules (libmc++'s lint, over this fork)
+        run: python3 tools/checks/lint.py "$FORK/src" "$FORK/modules" "$FORK/tools"
       - name: xlings
         run: |
           curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
@@ -51,7 +53,9 @@ jobs:
           echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
-          path: ~/.mcpp/registry/data/xpkgs
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
           key: mcxx-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
           restore-keys: mcxx-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-
       - name: mcpp and LLVM

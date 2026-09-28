@@ -711,7 +711,7 @@ struct Workspace::Impl final : engine::Host {
     // F15: the keywords go out without the core engine, which has not answered in KEYWORD_PATIENCE.
     // The job is finished first, so the engines' answers to the cancellation find nothing to finish.
     void answer_keywords_without_engine(std::uint64_t jobId) {
-        const Json clientId { jobs.at(jobId).clientId };
+        const Json clientId = jobs.at(jobId).clientId;   // `{ }` would wrap the id in an array, and no engine would find it
         ++keywordsWithoutEngine;
         jobs.at(jobId).answeredBy = "mcppls";
         finish_job(jobId, Json(nullptr));
