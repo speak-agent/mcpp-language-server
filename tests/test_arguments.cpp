@@ -20,7 +20,13 @@ using mcppls::toolchain::ToolchainFacts;
 
 namespace {
 
-std::filesystem::path repository() { return std::filesystem::path { std::source_location::current().file_name() }.parent_path().parent_path(); }
+// Upward from the working directory, as the other tests find the repository: a cross-built test's
+// source path is the build machine's.
+std::filesystem::path repository() {
+    std::filesystem::path directory { std::filesystem::current_path() };
+    while (!std::filesystem::is_regular_file(directory / "docs/specs/README.md") && directory.parent_path() != directory) directory = directory.parent_path();
+    return directory;
+}
 
 ToolchainFacts gcc_facts() {
     ToolchainFacts facts;
