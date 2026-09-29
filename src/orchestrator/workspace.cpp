@@ -92,6 +92,10 @@ struct WatchPatterns {
     std::mutex mutex;
     std::vector<std::string> entries;   // glob patterns relative to the root, or absolute paths
     int generation { 0 };               // advanced whenever `entries` is replaced
+    // The files `entries` covered when they were set, as they were then (polling only): what was
+    // there all along starts from that, and a file created or changed after it is reported, however
+    // soon after the model named it the next poll comes.
+    std::map<std::string, platform::fs::FileStamp> named;
 };
 
 // Whether `path` is one of `entries`: an absolute entry names the file, a relative one is a glob under `root`.
@@ -557,21 +561,25 @@ struct Workspace::Impl final : engine::Host {
             while (true) {
                 std::this_thread::sleep_for(std::chrono::seconds { 2 });
                 std::vector<std::string> entries;
+                std::map<std::string, platform::fs::FileStamp> named;
                 int generation { 0 };
                 {
                     const std::lock_guard lock { patterns->mutex };
                     entries = patterns->entries;
                     generation = patterns->generation;
+                    if (generation != knownGeneration) named = patterns->named;
                 }
                 std::map<std::string, platform::fs::FileStamp> current { watched_files_snapshot_of(rootPath, entries) };
                 // A model that names new inputs brings files into the watch that were there all along:
-                // they start from what they are now rather than being reported as created.
+                // they start from what they were when it named them rather than being reported as
+                // created. One created or changed since (before this poll) is reported.
                 const bool entriesChanged { generation != knownGeneration };
                 Json changes = Json::array();
                 for (const auto& [file, fileStamp] : current) {
                     const auto previous = known.find(file);
                     if (previous == known.end()) {
-                        if (entriesChanged && !watch_covers(knownEntries, rootPath, file)) continue;
+                        const auto there = named.find(file);
+                        if (entriesChanged && !watch_covers(knownEntries, rootPath, file) && there != named.end() && there->second == fileStamp) continue;
                         changes.push_back(Json { { "uri", base::path_to_uri(file) }, { "type", 1 } });
                     } else if (previous->second != fileStamp) {
                         changes.push_back(Json { { "uri", base::path_to_uri(file) }, { "type", 2 } });
@@ -1181,9 +1189,12 @@ struct Workspace::Impl final : engine::Host {
         const bool unchanged { model && description == modelDescription };
         model = std::move(loadedModel);
         if (watchChanged) {
+            std::map<std::string, platform::fs::FileStamp> named;
+            if (!dynamicWatch) named = watched_files_snapshot_of(root, model->watch);
             {
                 const std::lock_guard lock { watchPatterns->mutex };
                 watchPatterns->entries = model->watch;
+                watchPatterns->named = std::move(named);
                 ++watchPatterns->generation;
             }
             register_model_watch();
