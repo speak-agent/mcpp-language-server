@@ -36,3 +36,9 @@ type it cannot tell, an overload it would have to choose, a function defined in 
 reads: null, and the mcxx engine answers. So the first jump in a project that has not been built is
 answered at once rather than after the modules it imports are built. Checked by
 `tests/test_native_declarations.cpp`.
+
+Measured by the mcxx workflow's `self-mcpp` job (the mcpp repository, about 170 modules, cold, three
+rounds; CI run 36634456673): with the fixture's readiness check first, the first navigation came at
+13.77, 12.69 and 12.70 s (median 12.70 s; the clangd path's baseline was 87.8-126 s), the declaration
+itself answered 0.02 s after it was asked -- the time was the build description's. The job now runs
+`self-mcpp-first-jump`, which asks for the declaration as a user opening the project would: first.

@@ -191,8 +191,9 @@ jobs:
           start --expect-warm
 
   # A2.3.2: the mcpp repository (the self-mcpp fixture's commit, about 170 modules) opened cold, three
-  # times; the first navigation's time since the server started, and its median. The native engine
-  # answers a declaration from the imported interfaces' sources (M2.3) while the mcxx engine prepares.
+  # times, a declaration the first request (self-mcpp-first-jump); the first navigation's time since the
+  # server started, and its median. The native engine answers it from the imported interfaces' sources
+  # (M2.3) while the build description is read and the mcxx engine prepares.
   self-mcpp:
     name: self-mcpp cold starts (linux-x64, mcxx)
     needs: build
@@ -229,7 +230,7 @@ jobs:
           results="$RUNNER_TEMP/self-mcpp"
           mkdir -p "$results"
           for round in 1 2 3; do
-            stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload --fixture conformance/fixtures/self-mcpp \
+            stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload --fixture conformance/fixtures/self-mcpp-first-jump \
                 --workspace-dir "$RUNNER_TEMP/round-$round/workspace" --cache-dir "$RUNNER_TEMP/round-$round/cache" --timeout 900 \
                 --measure "$results/cold-$round.json" || true
           done
