@@ -46,6 +46,12 @@ sources = ["src/**/*.cppm", "src/**/*.cpp"]
 # built for 11.0. Honoured when cross-compiling from Linux since mcpp 2026.9.24.1 (mcpp#685).
 macos_deployment_target = "11.0"
 
+# A plugin library binds to the names this program offers (MC4 §3): on Linux the programs are
+# position-independent and static, their names exported -- less Clang's and LLVM's, by libmc++'s
+# src/exports.map, which build.mcpp passes -- and they relocate themselves when they start.
+[target.'cfg(os = "linux")'.build]
+ldflags = ["-Wl,-pie", "-Wl,-z,pack-relative-relocs", "-Wl,--export-dynamic"]
+
 # Every executable shares every module under src/.
 [targets.mcppls]
 kind = "bin"
@@ -82,6 +88,9 @@ microsoft = { path = "../../index/microsoft" }
 # The platform: openkal beneath musl, libc++ above it. One source builds every target.
 [dependencies]
 openkal-llvm-runtime.workspace = true
+# The C library, from speak-agent's fork, as libmc++'s own root names it: dlopen in a static program,
+# for MC4's plugin libraries (`library = "..."`), which the editor loads as a compile does.
+openkal-musl                   = { git = "https://github.com/speak-agent/openkal-musl.git", tag = "0.19.3" }
 cmdline.workspace              = true
 mcppls-base                    = { path = "modules/base" }
 mcppls-platform                = { path = "modules/platform" }
