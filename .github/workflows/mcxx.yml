@@ -190,6 +190,65 @@ jobs:
           start
           start --expect-warm
 
+  # A2.3.2: the mcpp repository (the self-mcpp fixture's commit, about 170 modules) opened cold, three
+  # times; the first navigation's time since the server started, and its median. The native engine
+  # answers a declaration from the imported interfaces' sources (M2.3) while the mcxx engine prepares.
+  self-mcpp:
+    name: self-mcpp cold starts (linux-x64, mcxx)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - name: mcpp and LLVM
+        run: bash .github/scripts/install-mcpp.sh
+      # What the mcpp repository builds with: GCC 16, and the mcpp its .xlings.json asks for (xlings
+      # runs that one inside it), next to MCPP_VERSION, which stays the default.
+      - name: GCC 16 and the mcpp the mcpp repository asks for
+        run: |
+          set -euo pipefail
+          mcpp toolchain install gcc 16.1.0
+          xlings install mcpp@2026.9.21.1 -y -g
+          xlings use mcpp "$MCPP_VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-linux-x64
+      - name: Unpack
+        run: tar -xzf mcxx-linux-x64.tar.gz
+      - name: Three cold starts
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/self-mcpp"
+          mkdir -p "$results"
+          for round in 1 2 3; do
+            stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload --fixture conformance/fixtures/self-mcpp \
+                --workspace-dir "$RUNNER_TEMP/round-$round/workspace" --cache-dir "$RUNNER_TEMP/round-$round/cache" --timeout 900 \
+                --measure "$results/cold-$round.json" || true
+          done
+          python3 - "$results" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, pathlib, statistics, sys
+          runs = [json.loads(p.read_text()) for p in sorted(pathlib.Path(sys.argv[1]).glob("cold-*.json"))]
+          first = [r.get("first-navigation") for r in runs]
+          print("| round | first navigation (s) | ready (s) | failures |\n|---|---|---|---|")
+          for i, r in enumerate(runs, 1):
+              print(f"| {i} | {r.get('first-navigation')} | {r.get('ready')} | {r.get('failures')} |")
+          known = [f for f in first if isinstance(f, (int, float))]
+          print(f"\nmedian first navigation: {statistics.median(known):.2f} s" if len(known) == len(runs) and known else "\na round never navigated")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: self-mcpp-timing
+          path: ${{ runner.temp }}/self-mcpp
+
   # ---------------------------------------------------------------------------
   # The other two platforms (M1's exit: A1.4 and A1.8 on mcppls' three). As upstream's ci.yml does,
   # one Linux host cross-builds the server -- the mcxx engine in it -- for openkal's Windows and macOS
@@ -306,24 +365,6 @@ jobs:
             echo "::endgroup::"
           done
           if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
-      # DIAGNOSTIC, while test_spec's child hangs on macOS (it runs itself as an S2 producer): the child
-      # started by hand under a watchdog, what it printed, and where it is after 10 s.
-      - name: Where test_spec's producer child is (macOS, on failure)
-        if: failure() && runner.os == 'macOS'
-        run: |
-          set -uo pipefail
-          exe="$GITHUB_WORKSPACE/built/unit/test_spec"
-          "$exe" --producer stream "$GITHUB_WORKSPACE/docs/specs/examples/s1-level3-gcc.json" > child.out 2> child.err & pid=$!
-          sleep 10
-          if kill -0 "$pid" 2> /dev/null; then
-            echo "--- still running after 10 s; its stacks ---"
-            sample "$pid" 3 -mayDie 2>&1 | head -120 || true
-            kill -9 "$pid" 2> /dev/null || true
-          else
-            wait "$pid"; echo "--- it exited with $? ---"
-          fi
-          echo "--- stdout ---"; head -c 2000 child.out
-          echo "--- stderr ---"; head -c 2000 child.err
 
   payload-cross:
     name: payload (${{ matrix.platform }}, mcxx)

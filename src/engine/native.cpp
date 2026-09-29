@@ -111,9 +111,8 @@ private:
         if (request.path.empty()) return nullptr;
         const auto position = position_of(request.params);
         if (!position) return nullptr;
-        if (method == lsp::method::TEXT_DOCUMENT_DEFINITION || method == lsp::method::TEXT_DOCUMENT_DECLARATION) {
-            return index_.definition(request.path, *position);
-        }
+        if (method == lsp::method::TEXT_DOCUMENT_DEFINITION) return index_.definition(request.path, *position);
+        if (method == lsp::method::TEXT_DOCUMENT_DECLARATION) return index_.declaration(request.path, *position);
         if (method == lsp::method::TEXT_DOCUMENT_HOVER) return index_.hover(request.path, *position);
         if (method == lsp::method::TEXT_DOCUMENT_COMPLETION) return index_.completion(request.path, request.text, *position);
         return nullptr;

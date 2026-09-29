@@ -9,6 +9,7 @@ import mcppls.base.text;
 import mcppls.spec.database;
 import mcppls.spec.metadata;
 import mcppls.project.scan;
+import mcppls.engine.native.declarations;
 
 export namespace mcppls::index {
 
@@ -41,6 +42,8 @@ private:
         std::vector<nlohmann::json> flat;
     };
     std::map<std::string, Outline, std::less<>> outlines_;
+    // Each file's parse, and what a name in it names (M2.3): answered before the engine can.
+    DeclarationIndex declarations_;
     std::vector<ExternalModule> external_;
     std::string profileLabel_;
     // What import completion offers (fix plan 2026-09-26 F9, D4): every module name with what
@@ -72,8 +75,11 @@ public:
     std::uint64_t structure_generation() const { return structure_; }
 
     std::optional<ModuleHit> module_at(std::string_view path, base::Position position) const;
-    // Each returns null when the position is not one this index answers for.
+    // Each returns null when the position is not one this index answers for. definition() and
+    // declaration(): a module name, or (M2.3) a name MC++'s own front end resolves for certain from
+    // the file and the sources of the interfaces it imports.
     nlohmann::json definition(std::string_view path, base::Position position) const;
+    nlohmann::json declaration(std::string_view path, base::Position position) const;
     nlohmann::json hover(std::string_view path, base::Position position) const;
     nlohmann::json completion(std::string_view path, std::string_view text, base::Position position) const;
 

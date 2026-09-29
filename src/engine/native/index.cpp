@@ -85,9 +85,10 @@ void ModuleIndex::update(std::string_view path, std::string_view text) {
     auto& entry = files_[base::path_key(path)];
     if (provided_identity(entry.second) != provided_identity(scan)) structure_changed_();
     entry = { std::string { path }, std::move(scan) };
-    // The outline, from MC++'s own front end: at once, whatever state the text is in.
+    // The outline, from MC++'s own front end: at once, whatever state the text is in. The parse is
+    // kept for what a name in the file names (declarations_).
     const std::string file { path };
-    const auto syntax = mcxx::frontend::parse(text, { .file = file });
+    const auto& syntax = declarations_.update(path, text);
     auto& outline = outlines_[base::path_key(path)];
     outline.document = mcxx::lsp::document_symbols(mcxx::frontend::symbols(syntax), text);
     outline.flat.clear();
@@ -105,6 +106,7 @@ void ModuleIndex::update(std::string_view path, std::string_view text) {
 
 void ModuleIndex::remove(std::string_view path) {
     outlines_.erase(base::path_key(path));
+    declarations_.remove(path);
     if (const auto it = files_.find(base::path_key(path)); it != files_.end()) {
         if (it->second.second.declaration) structure_changed_();
         files_.erase(it);
@@ -114,6 +116,7 @@ void ModuleIndex::remove(std::string_view path) {
 void ModuleIndex::clear() {
     files_.clear();
     outlines_.clear();
+    declarations_.clear();
     structure_changed_();
 }
 
@@ -204,9 +207,24 @@ std::optional<ModuleHit> ModuleIndex::module_at(std::string_view path, base::Pos
     return std::nullopt;
 }
 
+Json ModuleIndex::declaration(std::string_view path, base::Position position) const {
+    if (module_at(path, position)) return definition(path, position);
+    return declarations_.find(path, position_json(position), false, [this](std::string_view name) {
+        std::vector<std::string> paths;
+        for (const auto& unit : providers(name)) paths.push_back(unit.path);
+        return paths;
+    });
+}
+
 Json ModuleIndex::definition(std::string_view path, base::Position position) const {
     const auto hit = module_at(path, position);
-    if (!hit) return nullptr;
+    if (!hit) {
+        return declarations_.find(path, position_json(position), true, [this](std::string_view name) {
+            std::vector<std::string> paths;
+            for (const auto& unit : providers(name)) paths.push_back(unit.path);
+            return paths;
+        });
+    }
     Json locations = Json::array();
     std::string target { hit->name };
     // An implementation unit's declaration names its primary interface.

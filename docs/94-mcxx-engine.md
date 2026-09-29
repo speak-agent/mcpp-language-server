@@ -23,3 +23,16 @@ features have many more such steps across the fixtures.
 
 Also answered, beyond that list: workspace symbols, call hierarchy, document highlight, type
 definition and implementation (`mcxx::lsp::Service::capabilities`).
+
+## Declarations before the engine (M2.3)
+
+A definition or declaration request is first the native engine's (`src/engine/native/declarations.cppm`):
+MC++'s own front end (`mcxx.frontend`) resolves the name at the position over the file and the
+sources of the interfaces it imports -- its module's interface for an implementation unit, what it
+imports and what those re-export, each read as the editor has it -- with no BMI and no build. It
+answers only what it is sure of: the declarations of what the name names, and for a definition only
+one it has read (a class's body, an inline function, a variable). A name `std` declares, a member of a
+type it cannot tell, an overload it would have to choose, a function defined in a unit no importer
+reads: null, and the mcxx engine answers. So the first jump in a project that has not been built is
+answered at once rather than after the modules it imports are built. Checked by
+`tests/test_native_declarations.cpp`.
