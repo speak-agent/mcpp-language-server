@@ -1524,6 +1524,24 @@ public:
             std::string text { hover_text(result) };
             return { ok, text.substr(0, std::min<std::size_t>(text.size(), 160)) };
         }
+        if (kind == "signature-help-contains") {
+            open(file);
+            // `at` inside a call's parentheses; `expect`: a text one of the signatures' labels contains.
+            const std::string expected { check.value("expect", std::string {}) };
+            const auto labels = [](const Json& value) {
+                std::vector<std::string> out;
+                if (value.is_object() && value.contains("signatures") && value.at("signatures").is_array())
+                    for (const auto& s : value.at("signatures")) out.push_back(s.value("label", std::string {}));
+                return out;
+            };
+            auto [ok, result] = retry("textDocument/signatureHelp",
+                [&] { return Json { { "textDocument", Json { { "uri", uri(file) } } }, { "position", position(check.at("at")) } }; },
+                [&](const Json& value) {
+                    return std::ranges::any_of(labels(value), [&](const std::string& label) { return label.find(expected) != std::string::npos; });
+                });
+            const std::string shown { base::join(labels(result), " | ") };
+            return { ok, shown.substr(0, std::min<std::size_t>(shown.size(), 160)) };
+        }
         if (kind == "completion-contains") {
             open(file);
             if (auto insert = check.find("insert"); insert != check.end()) {
