@@ -306,6 +306,24 @@ jobs:
             echo "::endgroup::"
           done
           if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+      # DIAGNOSTIC, while test_spec's child hangs on macOS (it runs itself as an S2 producer): the child
+      # started by hand under a watchdog, what it printed, and where it is after 10 s.
+      - name: Where test_spec's producer child is (macOS, on failure)
+        if: failure() && runner.os == 'macOS'
+        run: |
+          set -uo pipefail
+          exe="$GITHUB_WORKSPACE/built/unit/test_spec"
+          "$exe" --producer stream "$GITHUB_WORKSPACE/docs/specs/examples/s1-level3-gcc.json" > child.out 2> child.err & pid=$!
+          sleep 10
+          if kill -0 "$pid" 2> /dev/null; then
+            echo "--- still running after 10 s; its stacks ---"
+            sample "$pid" 3 -mayDie 2>&1 | head -120 || true
+            kill -9 "$pid" 2> /dev/null || true
+          else
+            wait "$pid"; echo "--- it exited with $? ---"
+          fi
+          echo "--- stdout ---"; head -c 2000 child.out
+          echo "--- stderr ---"; head -c 2000 child.err
 
   payload-cross:
     name: payload (${{ matrix.platform }}, mcxx)
