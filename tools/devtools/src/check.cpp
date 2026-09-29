@@ -230,7 +230,7 @@ base::Result<Report> layers(const std::string& root) {
         { "openkal-llvm-runtime", 0 }, { "mcppls-os-linux", 0 }, { "mcppls-os-macos", 0 }, { "mcppls-os-windows", 0 },
         // libmc++ (the mcxx engine, Sunrisepeak/mcpp-safe): a library beneath the application, as a
         // third-party package is; only the root package may depend on it.
-        { "mcxx-msa", 3 }, { "mcxx-backend", 3 }, { "mcxx-lsp", 3 },
+        { "mcxx-msa", 3 }, { "mcxx-backend", 3 }, { "mcxx-lsp", 3 }, { "mcxx-frontend", 3 }, { "mcxx-plugins-std", 3 }, { "mcxx-plugins-libs", 3 },
     };
 
     for (const auto& path : *paths) {
