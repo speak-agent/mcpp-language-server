@@ -93,6 +93,8 @@ mcxx-backend                   = { path = "../../modules/backend/semantic" }
 mcxx-plugins-std               = { path = "../../plugins/std" }
 mcxx-plugins-libs              = { path = "../../plugins/libs" }
 mcxx-lsp                       = { path = "../../modules/lsp" }
+# MC++'s own front end (M1.8, E-LS-3): the native engine's lexing, outline and workspace symbols.
+mcxx-frontend                  = { path = "../../modules/frontend" }
 
 [dependencies.nlohmann]
 json.workspace = true

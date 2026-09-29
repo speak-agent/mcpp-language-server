@@ -26,13 +26,14 @@ namespace msa = ::mcxx::msa;
 // The requests this engine answers; everything else is left to others or to nobody.
 bool answers(std::string_view method) {
     namespace m = lsp::method;
-    static const std::array<std::string_view, 16> METHODS {
+    // The outline and workspace symbols are the native engine's, from MC++'s own front end (M1.8).
+    static const std::array<std::string_view, 14> METHODS {
         "textDocument/symbolInfo",   // clangd's extension, which mcppls's queries use
         "textDocument/prepareCallHierarchy", "callHierarchy/outgoingCalls",
         m::TEXT_DOCUMENT_DIAGNOSTIC,
         m::TEXT_DOCUMENT_DEFINITION,        m::TEXT_DOCUMENT_DECLARATION,     m::TEXT_DOCUMENT_TYPE_DEFINITION,
         m::TEXT_DOCUMENT_IMPLEMENTATION,    m::TEXT_DOCUMENT_HOVER,           m::TEXT_DOCUMENT_REFERENCES,
-        m::TEXT_DOCUMENT_DOCUMENT_HIGHLIGHT, m::TEXT_DOCUMENT_DOCUMENT_SYMBOL, m::WORKSPACE_SYMBOL,
+        m::TEXT_DOCUMENT_DOCUMENT_HIGHLIGHT,
         m::TEXT_DOCUMENT_COMPLETION,        m::TEXT_DOCUMENT_SIGNATURE_HELP,  m::TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
     };
     return std::ranges::find(METHODS, method) != METHODS.end();

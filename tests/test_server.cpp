@@ -336,6 +336,21 @@ int main() {
         expect(index.workspace_symbols("detail").size() == 1u);
     };
 
+    "the outline and workspace symbols come from MC++'s own front end (M1.8)"_test = [] {
+        mcppls::index::ModuleIndex index;
+        index.update("/p/src/greet.cppm", "export module hello.greet;\nexport namespace hello {\n    int greet(int times);\n    struct Greeter { int count; };\n}\n");
+        const Json outline = index.document_symbols("/p/src/greet.cppm");
+        expect(fatal(outline.size() == 2u)) << outline.dump();
+        expect(outline[0]["kind"] == 2 && outline[1]["name"] == "hello" && outline[1]["children"].size() == 2u) << outline.dump();
+        // A qualified query is a scope and a name, as clangd's is: greet and Greeter in hello, not
+        // Greeter's member.
+        const Json qualified = index.workspace_symbols("hello::greet");
+        expect(qualified.size() == 2u && std::ranges::any_of(qualified, [](const Json& s) { return s["name"] == "greet" && s["containerName"] == "hello"; }))
+            << qualified.dump();
+        expect(index.workspace_symbols("GREETER").size() == 1u);
+        expect(index.workspace_symbols("greeter::count").size() == 1u);
+    };
+
     "module diagnostics"_test = [] {
         auto index = fixture_index();
         const Json impl = index.diagnostics("/p/src/greet/impl.cpp");

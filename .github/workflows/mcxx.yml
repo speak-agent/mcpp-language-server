@@ -175,3 +175,17 @@ jobs:
             echo "::endgroup::"
           done
           if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+      # A warm start builds no module (A1.4.4, E-LS-1): mcxx-warm cold, then again with the same
+      # workspace and cache; every module file the second session sees is the one the first left.
+      - name: Cold and warm start
+        if: matrix.part == 1
+        run: |
+          set -euo pipefail
+          warm="$RUNNER_TEMP/warm"
+          rm -rf "$warm"
+          start() {
+            stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload --fixture conformance/fixtures/mcxx-warm \
+                --workspace-dir "$warm/workspace" --cache-dir "$warm/cache" --timeout 180 "$@"
+          }
+          start
+          start --expect-warm

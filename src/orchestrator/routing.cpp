@@ -69,6 +69,9 @@ Json merge_results(std::string_view method, std::span<const std::pair<std::strin
 
 Json merge_document_symbols(const Json& engineResult, const Json& moduleSymbols) {
     if (!moduleSymbols.is_array() || moduleSymbols.empty()) return engineResult.is_null() ? Json::array() : engineResult;
+    // The native engine's own outline (M1.8: MC++'s own front end) is the file's: an engine's is not added to it.
+    constexpr int SYMBOL_KIND_MODULE { 2 };
+    if (std::ranges::any_of(moduleSymbols, [](const Json& s) { return s.value("kind", 0) != SYMBOL_KIND_MODULE; })) return moduleSymbols;
     if (!engineResult.is_array() || engineResult.empty()) return moduleSymbols;
     // SymbolInformation[] (flat, with "location") cannot hold DocumentSymbol entries.
     if (engineResult.front().contains("location")) return engineResult;

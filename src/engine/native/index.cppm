@@ -34,6 +34,13 @@ struct ModuleHit {
 class ModuleIndex {
 private:
     std::map<std::string, std::pair<std::string, project::ScanResult>, std::less<>> files_;   // path key -> (path, scan)
+    // Each file's outline from MC++'s own front end (mcxx.frontend, M1.8): DocumentSymbol[], and the
+    // same flattened as SymbolInformation[] for workspace/symbol.
+    struct Outline {
+        nlohmann::json document;
+        std::vector<nlohmann::json> flat;
+    };
+    std::map<std::string, Outline, std::less<>> outlines_;
     std::vector<ExternalModule> external_;
     std::string profileLabel_;
     // What import completion offers (fix plan 2026-09-26 F9, D4): every module name with what
