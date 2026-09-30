@@ -268,10 +268,64 @@ jobs:
   # targets; the unit tests are cross-built too and run on the platforms' own runners. The payloads
   # are assembled (Windows' on Linux, macOS' on a macOS host with the cross-built packaging tool) and
   # the fixtures run on the platforms themselves.
+  # AS.4.1: MC++'s own compiler as mcpp's toolchain, for the release builds and the self-host job. Built
+  # once from libmc++, assembled in xim:llvm's layout (tools/payload/payload.py, llvm.clang-dev's
+  # generated intrinsics headers among its builtin ones) and handed on: its links point into the LLVM
+  # 22.1.8 payload each consumer installs at the same place.
+  mcxx-toolchain:
+    name: mcxx, the toolchain (linux-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: This fork
+        uses: actions/checkout@v4
+        with:
+          path: forks/mcpp-language-server
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mcxx-toolchain-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+          restore-keys: mcxx-toolchain-${{ runner.os }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: bash "$FORK/.github/scripts/install-mcpp.sh"
+      - name: Build and assemble
+        run: |
+          set -euo pipefail
+          mcpp build -j auto
+          mcxx=$(realpath "$(find target -type f -name mcxx -path '*/bin/*' | head -1)")
+          headers=$(ls -d "$PWD"/.mcpp/.xlings/data/xpkgs/llvm-x-clang-dev/*/*/llvm/clang/lib/Headers | sort -V | tail -1)
+          python3 tools/payload/payload.py --mcxx "$mcxx" --llvm "$HOME/.mcpp/registry/data/xpkgs/xim-x-llvm/$LLVM_VERSION" \
+              --headers "$headers" --out "$RUNNER_TEMP/mcxx-toolchain"
+          test -f "$RUNNER_TEMP/mcxx-toolchain/lib/clang/23/include/arm_neon.h"
+          "$RUNNER_TEMP/mcxx-toolchain/bin/clang++" --version
+          tar -C "$RUNNER_TEMP" -czf mcxx-toolchain.tar.gz mcxx-toolchain
+          du -sh mcxx-toolchain.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcxx-toolchain
+          path: mcxx-toolchain.tar.gz
+          retention-days: 7
+
   # Release builds, from Linux: the other platforms' cross-built, linux-x64's too (what a release
   # ships, and what AS.2.2 weighs; the build job's is a dev build, with debug information).
   cross-build:
     name: release build from Linux (${{ matrix.target }})
+    needs: mcxx-toolchain
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -308,12 +362,29 @@ jobs:
           restore-keys: mcxx-cross-${{ matrix.target }}-${{ env.MCPP_VERSION }}-
       - name: mcpp and LLVM
         run: bash "$FORK/.github/scripts/install-mcpp.sh"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-toolchain
+      # Where mcpp looks an llvm toolchain up by version: the assembled payload links into the LLVM
+      # 22.1.8 payload the step before installed, at the same place as where it was assembled.
+      - name: mcxx as mcpp's toolchain llvm@23.1.0-mcxx
+        run: |
+          set -euo pipefail
+          store="$HOME/.mcpp/registry/data/xpkgs"
+          mkdir -p "$store/mcxx-x-mcxx"
+          rm -rf "$store/mcxx-x-mcxx/0.1.0" "$store/mcxx-x-mcxx/mcxx-toolchain"
+          tar -xzf mcxx-toolchain.tar.gz -C "$store/mcxx-x-mcxx"
+          mv "$store/mcxx-x-mcxx/mcxx-toolchain" "$store/mcxx-x-mcxx/0.1.0"
+          ln -sfn "$store/mcxx-x-mcxx/0.1.0" "$store/xim-x-llvm/23.1.0-mcxx"
+          "$store/xim-x-llvm/23.1.0-mcxx/bin/clang++" --version
       - name: Build for ${{ matrix.target }}
         working-directory: ${{ env.FORK }}
         run: |
           set -euo pipefail
-          mcpp build -j auto --profile release --target ${{ matrix.target }}
-          mcpp build -j auto -p devtools --profile release --target ${{ matrix.target }}
+          # Built by MC++'s compiler (AS.4.1): mcpp says which toolchain it resolved.
+          mcpp build -j auto --profile release --target ${{ matrix.target }} --toolchain llvm@23.1.0-mcxx 2>&1 | tee build.log
+          mcpp build -j auto -p devtools --profile release --target ${{ matrix.target }} --toolchain llvm@23.1.0-mcxx 2>&1 | tee -a build.log
+          grep -q 'Resolved llvm@23.1.0-mcxx' build.log
           mkdir -p cross
           for exe in mcppls mcppls-conformance mcppls-mock-mcpp mcppls-mock-model mcppls-devtools; do
             path=$(ls -t $(find target tools/devtools/target -type f -name "$exe${{ matrix.exe }}" -path '*/${{ matrix.target }}/*/bin/*') | head -1)
@@ -326,8 +397,8 @@ jobs:
         working-directory: ${{ env.FORK }}
         run: |
           set -euo pipefail
-          mcpp test --target ${{ matrix.target }} --no-run
-          mcpp test --workspace --target ${{ matrix.target }} --no-run
+          mcpp test --target ${{ matrix.target }} --no-run --toolchain llvm@23.1.0-mcxx
+          mcpp test --workspace --target ${{ matrix.target }} --no-run --toolchain llvm@23.1.0-mcxx
           mkdir -p unit
           for source in tests/*.cpp modules/*/tests/*.cpp tools/*/tests/*.cpp; do
             [ -f "$source" ] || continue
@@ -621,12 +692,14 @@ jobs:
           name: mcxx-timing-${{ matrix.platform }}
           path: ${{ runner.temp }}/timing
 
-  # MS (AS.4.1, AS.4.2): mcppls built by MC++'s own compiler. libmc++'s mcxx is built and installed as
-  # mcpp's `llvm@23.1.0-mcxx` toolchain from libmc++'s xpkg (tools/checks/xlings.py, E-XL-1); this fork is
-  # built with it -- each program then says which compiler made it -- and its own tests (one program
-  # at a time: a dev test program is some 220 MB) and the linux-x64 fixtures run on what it built.
+  # MS (AS.4.1, AS.4.2): mcppls built by MC++'s own compiler. The mcxx-toolchain job's payload is mcpp's
+  # `llvm@23.1.0-mcxx` toolchain here (libmc++'s CI installs the same through its xpkg, E-XL-1); this
+  # fork is built with it -- each program then says which compiler made it -- and its own tests (one
+  # program at a time: a dev test program is some 220 MB) and the linux-x64 fixtures run on what it
+  # built. The release builds use it too (cross-build), and so everything the other jobs run on.
   self-host:
     name: built by mcxx (linux-x64)
+    needs: mcxx-toolchain
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 300
@@ -659,14 +732,19 @@ jobs:
         run: bash "$FORK/.github/scripts/install-mcpp.sh"
       - name: Tools for the kit configure
         run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build libc6-dev linux-libc-dev
-      - name: mcxx, as mcpp's toolchain llvm@23.1.0-mcxx
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-toolchain
+      - name: mcxx as mcpp's toolchain llvm@23.1.0-mcxx
         run: |
           set -euo pipefail
-          mcpp build -j auto
-          mcxx=$(realpath "$(find target -type f -name mcxx -path '*/bin/*' | head -1)")
-          headers=$(ls -d "$PWD"/.mcpp/.xlings/data/xpkgs/llvm-x-clang-dev/23.1.0.6/*/llvm/clang/lib/Headers | head -1)
-          python3 tools/checks/xlings.py --mcxx "$mcxx" --headers "$headers"
-          rm -rf target   # the driver is installed; its build is not needed again
+          store="$HOME/.mcpp/registry/data/xpkgs"
+          mkdir -p "$store/mcxx-x-mcxx"
+          rm -rf "$store/mcxx-x-mcxx/0.1.0" "$store/mcxx-x-mcxx/mcxx-toolchain"
+          tar -xzf mcxx-toolchain.tar.gz -C "$store/mcxx-x-mcxx"
+          mv "$store/mcxx-x-mcxx/mcxx-toolchain" "$store/mcxx-x-mcxx/0.1.0"
+          ln -sfn "$store/mcxx-x-mcxx/0.1.0" "$store/xim-x-llvm/23.1.0-mcxx"
+          "$store/xim-x-llvm/23.1.0-mcxx/bin/clang++" --version
       - name: This fork, built with mcxx
         working-directory: ${{ env.FORK }}
         run: |
