@@ -193,12 +193,13 @@ jobs:
   # A2.3.2: the mcpp repository (the self-mcpp fixture's commit, about 170 modules) opened cold, three
   # times, a declaration the first request (self-mcpp-first-jump); the first navigation's time since the
   # server started, and its median. The native engine answers it from the imported interfaces' sources
-  # (M2.3) while the build description is read and the mcxx engine prepares.
+  # (M2.3) while the build description is read and the mcxx engine prepares. A2.3.3: the same for
+  # real-xlings and self-mcppls, whose baselines (the clangd path) are 12.3 s and 15.1 s.
   self-mcpp:
-    name: self-mcpp cold starts (linux-x64, mcxx)
+    name: cold starts (linux-x64, mcxx)
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 180
     defaults:
       run:
         shell: bash
@@ -224,25 +225,33 @@ jobs:
           name: mcxx-linux-x64
       - name: Unpack
         run: tar -xzf mcxx-linux-x64.tar.gz
-      - name: Three cold starts
+      - name: Three cold starts of each
         run: |
           set -euo pipefail
           results="$RUNNER_TEMP/self-mcpp"
           mkdir -p "$results"
-          for round in 1 2 3; do
-            stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload --fixture conformance/fixtures/self-mcpp-first-jump \
-                --workspace-dir "$RUNNER_TEMP/round-$round/workspace" --cache-dir "$RUNNER_TEMP/round-$round/cache" --timeout 900 \
-                --measure "$results/cold-$round.json" || true
+          for fixture in self-mcpp-first-jump real-xlings self-mcppls; do
+            for round in 1 2 3; do
+              stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload --fixture "conformance/fixtures/$fixture" \
+                  --workspace-dir "$RUNNER_TEMP/$fixture-$round/workspace" --cache-dir "$RUNNER_TEMP/$fixture-$round/cache" --timeout 900 \
+                  --measure "$results/$fixture-cold-$round.json" || true
+            done
           done
           python3 - "$results" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json, pathlib, statistics, sys
-          runs = [json.loads(p.read_text()) for p in sorted(pathlib.Path(sys.argv[1]).glob("cold-*.json"))]
-          first = [r.get("first-navigation") for r in runs]
-          print("| round | first navigation (s) | ready (s) | failures |\n|---|---|---|---|")
-          for i, r in enumerate(runs, 1):
-              print(f"| {i} | {r.get('first-navigation')} | {r.get('ready')} | {r.get('failures')} |")
-          known = [f for f in first if isinstance(f, (int, float))]
-          print(f"\nmedian first navigation: {statistics.median(known):.2f} s" if len(known) == len(runs) and known else "\na round never navigated")
+          # The criterion each is held to: A2.3.2's 10 s, A2.3.3's baselines (the clangd path).
+          limits = { "self-mcpp-first-jump": 10.0, "real-xlings": 12.3, "self-mcppls": 15.1 }
+          for fixture, limit in limits.items():
+              runs = [json.loads(p.read_text()) for p in sorted(pathlib.Path(sys.argv[1]).glob(f"{fixture}-cold-*.json"))]
+              print(f"### {fixture} (at most {limit} s)\n\n| round | first navigation (s) | ready (s) | failures |\n|---|---|---|---|")
+              for i, r in enumerate(runs, 1):
+                  print(f"| {i} | {r.get('first-navigation')} | {r.get('ready')} | {r.get('failures')} |")
+              known = [r.get("first-navigation") for r in runs if isinstance(r.get("first-navigation"), (int, float))]
+              if runs and len(known) == len(runs):
+                  median = statistics.median(known)
+                  print(f"\nmedian first navigation: {median:.2f} s ({'within' if median <= limit else 'over'} {limit} s)\n")
+              else:
+                  print("\na round never navigated\n")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
