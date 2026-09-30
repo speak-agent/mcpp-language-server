@@ -228,45 +228,7 @@ jobs:
       - name: Unpack
         run: tar -xzf mcxx-linux-x64.tar.gz
       - name: Three cold starts of each
-        run: |
-          set -euo pipefail
-          results="$RUNNER_TEMP/self-mcpp"
-          mkdir -p "$results"
-          for fixture in self-mcpp-first-jump real-xlings-first-jump self-mcppls-first-jump; do
-            for round in 1 2 3; do
-              stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload --fixture "conformance/fixtures/$fixture" \
-                  --workspace-dir "$RUNNER_TEMP/$fixture-$round/workspace" --cache-dir "$RUNNER_TEMP/$fixture-$round/cache" --timeout 300 \
-                  --measure "$results/$fixture-cold-$round.json" || true
-              mkdir -p "$results/logs/$fixture-$round" && cp "$RUNNER_TEMP/$fixture-$round/cache/logs/"*.log "$results/logs/$fixture-$round/" 2>/dev/null || true
-            done
-          done
-          python3 - "$results" >> "$GITHUB_STEP_SUMMARY" <<'PY'
-          import json, pathlib, statistics, sys
-          # The criterion each is held to: A2.3.2's 10 s, A2.3.3's baselines (the clangd path).
-          limits = { "self-mcpp-first-jump": 10.0, "real-xlings-first-jump": 12.3, "self-mcppls-first-jump": 15.1 }
-          # A gate, not only a table: a round whose checks failed (real-xlings' definitions answered []
-          # for 300 s went unnoticed while this only measured), or a median over its limit, fails the job.
-          missed = []
-          for fixture, limit in limits.items():
-              runs = [json.loads(p.read_text()) for p in sorted(pathlib.Path(sys.argv[1]).glob(f"{fixture}-cold-*.json"))]
-              print(f"### {fixture} (at most {limit} s)\n\n| round | first navigation (s) | ready (s) | failures |\n|---|---|---|---|")
-              for i, r in enumerate(runs, 1):
-                  print(f"| {i} | {r.get('first-navigation')} | {r.get('ready')} | {r.get('failures')} |")
-                  if r.get("failures"):
-                      missed.append(f"{fixture} round {i}: {r.get('failures')} failures")
-              known = [r.get("first-navigation") for r in runs if isinstance(r.get("first-navigation"), (int, float))]
-              if runs and len(known) == len(runs):
-                  median = statistics.median(known)
-                  print(f"\nmedian first navigation: {median:.2f} s ({'within' if median <= limit else 'over'} {limit} s)\n")
-                  if median > limit:
-                      missed.append(f"{fixture}: median {median:.2f} s over {limit} s")
-              else:
-                  print("\na round never navigated\n")
-                  missed.append(f"{fixture}: a round never navigated")
-          for m in missed:
-              print(m, file=sys.stderr)
-          sys.exit(1 if missed else 0)
-          PY
+        run: bash .github/scripts/cold-starts.sh stage/mcppls-conformance stage/mcppls payload "$RUNNER_TEMP/self-mcpp"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -606,6 +568,53 @@ jobs:
           }
           start
           start --expect-warm
+
+  # A2.3.2 and A2.3.3 on the other two platforms (M2's exit: A2.3.2 - A2.3.4 on three; A2.3.4 is the
+  # conformance job's cold and warm start): the same three cold starts of each first-jump fixture, on
+  # the platform's release payload, held to the same limits. The projects' own toolchains here: the
+  # mcpp repository asks for llvm 22.1.8 on macOS and 20.1.7 on Windows, xlings for 20.1.7 on both,
+  # mcpp-language-server for 22.1.8; and the mcpp the mcpp repository's .xlings.json names.
+  cold-starts-cross:
+    name: cold starts (${{ matrix.platform }}, mcxx)
+    needs: payload-cross
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            os: macos-14
+          - platform: win32-x64
+            os: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mcpp
+      - name: The projects' toolchains, and the mcpp the mcpp repository asks for
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do mcpp toolchain install llvm 20.1.7 && break; sleep 30; done
+          xlings install mcpp@2026.9.21.1 -y -g
+          xlings use mcpp "$MCPP_VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-release-${{ matrix.platform }}
+      - name: Unpack
+        run: |
+          tar -xzf mcxx-${{ matrix.platform }}.tar.gz && ls payload stage
+          if [ "$RUNNER_OS" = macOS ]; then for f in stage/* payload/bin/*; do [ -f "$f" ] && [ -x "$f" ] && codesign -s - -f "$f" || true; done; fi
+      - name: Three cold starts of each
+        run: |
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          bash .github/scripts/cold-starts.sh "stage/mcppls-conformance$exe" "payload/bin/mcppls$exe" payload "$RUNNER_TEMP/cold-starts"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cold-starts-${{ matrix.platform }}
+          path: ${{ runner.temp }}/cold-starts
 
   # MS (AS.3.2, AS.3.4): what release-checks.yml asks of a release, on the mcxx engine and its payload
   # (no clangd), on each platform: five cold and five warm starts of the timing fixture, their medians
