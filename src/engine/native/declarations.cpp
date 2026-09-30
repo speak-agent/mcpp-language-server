@@ -131,26 +131,45 @@ const DeclarationIndex::File* DeclarationIndex::file_(std::string_view path) con
     return it == files_.end() ? nullptr : it->second.get();
 }
 
-const f::Syntax& DeclarationIndex::update(std::string_view path, std::string_view text) {
+void DeclarationIndex::update(std::string_view path, std::string_view text) {
     auto file { std::make_shared<File>() };
     file->path = std::string { path };
     file->text = std::string { text };
-    file->syntax = f::parse(file->text, { .file = file->path });
-    // Its declarations as an importer sees them: names, kinds, types, bases and template parameters,
-    // each matched to its declaration (the same name, the same kind) for whether it defines.
-    file->facts = f::facts(file->syntax, f::Imported {}).declarations;
-    std::map<std::tuple<std::uint32_t, std::uint32_t, msa::Kind>, bool> defining;
-    for (const auto& d : file->syntax.declarations) {
-        const auto at { f::fact_name(file->syntax, d) };
-        defining.try_emplace({ at.begin.line, at.begin.column, d.kind }, defines(d));
-    }
-    for (const auto& fact : file->facts) {
-        const auto it = defining.find({ fact.name.begin.line, fact.name.begin.column, fact.kind });
-        file->defines.push_back(it != defining.end() && it->second);
-    }
-    auto& slot = files_[base::path_key(path)];
-    slot = std::move(file);
-    return slot->syntax;
+    files_[base::path_key(path)] = std::move(file);
+}
+
+const f::Syntax* DeclarationIndex::syntax(std::string_view path) const {
+    const File* file { file_(path) };
+    return file == nullptr ? nullptr : &parsed(*file).syntax;
+}
+
+std::string_view DeclarationIndex::text(std::string_view path) const {
+    const File* file { file_(path) };
+    return file == nullptr ? std::string_view {} : std::string_view { file->text };
+}
+
+const DeclarationIndex::File& DeclarationIndex::parsed(const File& file) {
+    std::call_once(file.parsed_once, [&] { file.syntax = f::parse(file.text, { .file = file.path }); });
+    return file;
+}
+
+const DeclarationIndex::File& DeclarationIndex::ready(const File& file) {
+    parsed(file);
+    std::call_once(file.once, [&] {
+        // Its declarations as an importer sees them: names, kinds, types, bases and template parameters,
+        // each matched to its declaration (the same name, the same kind) for whether it defines.
+        file.facts = f::facts(file.syntax, f::Imported {}).declarations;
+        std::map<std::tuple<std::uint32_t, std::uint32_t, msa::Kind>, bool> defining;
+        for (const auto& d : file.syntax.declarations) {
+            const auto at { f::fact_name(file.syntax, d) };
+            defining.try_emplace({ at.begin.line, at.begin.column, d.kind }, defines(d));
+        }
+        for (const auto& fact : file.facts) {
+            const auto it = defining.find({ fact.name.begin.line, fact.name.begin.column, fact.kind });
+            file.defines.push_back(it != defining.end() && it->second);
+        }
+    });
+    return file;
 }
 
 void DeclarationIndex::remove(std::string_view path) { files_.erase(base::path_key(path)); }
@@ -175,6 +194,7 @@ f::Imported DeclarationIndex::imported_by(const File& self, const Providers& pro
         for (const auto& unit : providers(name)) {
             const File* g { file_(unit) };
             if (g == nullptr || g == file) continue;
+            ready(*g);
             for (std::size_t k { 0 }; k < g->facts.size(); ++k) {
                 const auto& d = g->facts[k];
                 if (d.local || d.kind == msa::Kind::parameter || (!same && !d.exported)) continue;
@@ -193,6 +213,7 @@ f::Imported DeclarationIndex::imported_by(const File& self, const Providers& pro
 Json DeclarationIndex::find(std::string_view path, const Json& position, bool definition, const Providers& providers) const {
     const File* file { file_(path) };
     if (file == nullptr) return nullptr;
+    ready(*file);
     const msa::Position at { mcxx::lsp::from_lsp(position, file->text) };
     std::vector<std::pair<const File*, std::size_t>> origin;   // each imported declaration's file and fact
     const auto imported { imported_by(*file, providers, origin) };
@@ -238,6 +259,7 @@ Json DeclarationIndex::find(std::string_view path, const Json& position, bool de
 Json DeclarationIndex::hover(std::string_view path, const Json& position, const Providers& providers) const {
     const File* file { file_(path) };
     if (file == nullptr) return nullptr;
+    ready(*file);
     const msa::Position at { mcxx::lsp::from_lsp(position, file->text) };
     std::vector<std::pair<const File*, std::size_t>> origin;
     const auto imported { imported_by(*file, providers, origin) };
@@ -278,6 +300,7 @@ Json DeclarationIndex::hover(std::string_view path, const Json& position, const 
 Json DeclarationIndex::completion(std::string_view path, const Json& position, const Providers& providers) const {
     const File* file { file_(path) };
     if (file == nullptr) return nullptr;
+    parsed(*file);
     const msa::Position at { mcxx::lsp::from_lsp(position, file->text) };
     std::vector<std::pair<const File*, std::size_t>> origin;
     const auto imported { imported_by(*file, providers, origin) };

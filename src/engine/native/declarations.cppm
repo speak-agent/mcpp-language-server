@@ -18,8 +18,12 @@ public:
     // The files of a module's interface units (its primary interface and partitions).
     using Providers = std::function<std::vector<std::string>(std::string_view module)>;
 
-    // A file's text as it is now (an open buffer, or the disk's); its parse, for its outline too.
-    const mcxx::frontend::Syntax& update(std::string_view path, std::string_view text);
+    // A file's text as it is now (an open buffer, or the disk's). It is parsed when first needed: a
+    // lookup in it or through it, its outline (syntax()).
+    void update(std::string_view path, std::string_view text);
+    // Its parse (none: a file not read), for its outline; its text.
+    const mcxx::frontend::Syntax* syntax(std::string_view path) const;
+    std::string_view text(std::string_view path) const;
     void remove(std::string_view path);
     void clear();
 
@@ -44,15 +48,23 @@ private:
     struct File {
         std::string path;
         std::string text;   // the syntax's tokens view it
-        mcxx::frontend::Syntax syntax;
+        // Its parse: made when first needed (parsed()), as its facts are.
+        mutable std::once_flag parsed_once;
+        mutable mcxx::frontend::Syntax syntax;
         // Its declarations as MC3 facts (what an importer of its module sees), and for each whether
-        // it is a definition (a body, a class's members; a variable, an alias).
-        std::vector<mcxx::msa::fact::Declaration> facts;
-        std::vector<bool> defines;
+        // it is a definition (a body, a class's members; a variable, an alias): worked out when a
+        // lookup first reads the file (ready()), not when it is read -- a project's worth of files is
+        // read before a cold start's first jump, which needs a few of them.
+        mutable std::once_flag once;
+        mutable std::vector<mcxx::msa::fact::Declaration> facts;
+        mutable std::vector<bool> defines;
     };
     std::map<std::string, std::shared_ptr<const File>, std::less<>> files_;   // by path key
 
     const File* file_(std::string_view path) const;
+    // `file`, parsed; parsed and its facts worked out.
+    static const File& parsed(const File& file);
+    static const File& ready(const File& file);
     // What `file` names but does not declare: its module's interface (an implementation unit's), what
     // it imports and what those re-export, each unit's declarations from its source; `origin`, each
     // one's file and fact.

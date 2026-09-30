@@ -41,7 +41,10 @@ private:
         nlohmann::json document;
         std::vector<nlohmann::json> flat;
     };
-    std::map<std::string, Outline, std::less<>> outlines_;
+    // Made when first asked for (a documentSymbol, a workspace/symbol): reading a project's files is
+    // then no more than scanning them, as a cold start's first jump needs.
+    mutable std::map<std::string, Outline, std::less<>> outlines_;
+    const Outline* outline_(std::string_view path) const;
     // Each file's parse, and what a name in it names (M2.3): answered before the engine can.
     DeclarationIndex declarations_;
     std::vector<ExternalModule> external_;

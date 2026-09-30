@@ -85,14 +85,19 @@ void ModuleIndex::update(std::string_view path, std::string_view text) {
     auto& entry = files_[base::path_key(path)];
     if (provided_identity(entry.second) != provided_identity(scan)) structure_changed_();
     entry = { std::string { path }, std::move(scan) };
-    // The outline, from MC++'s own front end: at once, whatever state the text is in. The parse is
-    // kept for what a name in the file names (declarations_).
-    const std::string file { path };
-    const auto& syntax = declarations_.update(path, text);
-    auto& outline = outlines_[base::path_key(path)];
-    outline.document = mcxx::lsp::document_symbols(mcxx::frontend::symbols(syntax), text);
-    outline.flat.clear();
-    const std::string uri { base::path_to_uri(file) };
+    // Its parse and its outline, from MC++'s own front end, are made when first needed.
+    declarations_.update(path, text);
+    outlines_.erase(base::path_key(path));
+}
+
+const ModuleIndex::Outline* ModuleIndex::outline_(std::string_view path) const {
+    const std::string key { base::path_key(path) };
+    if (const auto it = outlines_.find(key); it != outlines_.end()) return &it->second;
+    const auto* syntax = declarations_.syntax(path);
+    if (syntax == nullptr) return nullptr;
+    auto& outline = outlines_[key];
+    outline.document = mcxx::lsp::document_symbols(mcxx::frontend::symbols(*syntax), declarations_.text(path));
+    const std::string uri { base::path_to_uri(std::string { path }) };
     std::function<void(const Json&, const std::string&)> flatten = [&](const Json& symbols, const std::string& container) {
         for (const auto& s : symbols) {
             outline.flat.push_back(Json { { "name", s["name"] }, { "kind", s["kind"] },
@@ -102,6 +107,7 @@ void ModuleIndex::update(std::string_view path, std::string_view text) {
         }
     };
     flatten(outline.document, {});
+    return &outline;
 }
 
 void ModuleIndex::remove(std::string_view path) {
@@ -357,8 +363,8 @@ Json ModuleIndex::document_symbols(std::string_view path) const {
                                 { "selectionRange", to_json(declaration.nameRange) } });
     }
     // The file's own declarations (M1.8: MC++'s own front end, not a parse).
-    if (const auto it = outlines_.find(base::path_key(path)); it != outlines_.end())
-        for (const auto& s : it->second.document) result.push_back(s);
+    if (const auto* outline = outline_(path))
+        for (const auto& s : outline->document) result.push_back(s);
     return result;
 }
 
@@ -378,13 +384,16 @@ Json ModuleIndex::workspace_symbols(std::string_view query) const {
     const auto qualifier = needle.rfind("::");
     const std::string scope { qualifier == std::string::npos ? std::string {} : needle.substr(0, qualifier) };
     const std::string wanted { qualifier == std::string::npos ? needle : needle.substr(qualifier + 2) };
-    for (const auto& [key, outline] : outlines_)
-        for (const auto& s : outline.flat) {
+    for (const auto& [key, file] : files_) {
+        const auto* outline = outline_(file.first);
+        if (outline == nullptr) continue;
+        for (const auto& s : outline->flat) {
             const std::string name { base::to_lower_ascii(s["name"].get<std::string>()) };
             const std::string container { base::to_lower_ascii(s.value("containerName", std::string {})) };
             const bool in_scope { scope.empty() || container == scope || container.ends_with("::" + scope) };
             if (in_scope && name.find(wanted) != std::string::npos) result.push_back(s);
         }
+    }
     return result;
 }
 
