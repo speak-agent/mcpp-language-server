@@ -1,10 +1,10 @@
 {
   "name": "mcxx-warm",
-  "description": "A warm start builds no module (A1.4.4, E-LS-1): run cold, then again with the same --workspace-dir and --cache-dir and --expect-warm. The second session navigates across the program's modules, and every published module file -- std, the program's interface and its partition -- is the one the first session left: none rebuilt, none added. W0 waits, in both sessions, until the core engine has prepared the program (main.cpp's diagnostics come from it once its modules are built): the native engine answers W1 on its own, so without it the first session could end before the core engine built anything.",
+  "description": "A warm start builds no module (A1.4.4, E-LS-1): run cold, then again with the same --workspace-dir and --cache-dir and --expect-warm. The second session navigates across the program's modules, and every published module file -- std, the program's interface and its partition -- is the one the first session left: none rebuilt, none added. W0 waits, in both sessions, until the core engine has prepared the program: the references to hello::greet come from its program index, which has main.cpp only once the modules it imports are built (diagnostics do not tell: an empty list is published before). The native engine answers W1 on its own, so without W0 the first session could end before the core engine built anything.",
   "server-arguments": ["--no-discover"],
   "checks": [
     { "id": "W1-navigation-across-modules", "kind": "definition", "file": "src/main.cpp", "at": [4, 31], "expect": "src/greet/greet.cppm" },
-    { "id": "W0-prepared", "kind": "diagnostics-empty", "file": "src/main.cpp" },
+    { "id": "W0-prepared", "kind": "references-span", "file": "src/main.cpp", "at": [4, 31], "expect": ["src/main.cpp", "src/greet/greet.cppm"] },
     { "id": "W2-std-reused", "kind": "module-cache-reused", "module": "std" },
     { "id": "W3-interface-reused", "kind": "module-cache-reused", "module": "hello.greet" },
     { "id": "W4-partition-reused", "kind": "module-cache-reused", "module": "hello.greet:detail" }
