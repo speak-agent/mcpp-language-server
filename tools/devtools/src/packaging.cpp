@@ -115,7 +115,8 @@ Payload assemble_payload(const std::string& root, std::string_view platformName,
 
     const std::string resource { base::join_path(work, "mcxx-resource") };
     std::println("  staging the mcxx engine's builtin headers ...");
-    auto staged = pack::resource::stage(pack::resource::Options { .outDirectory = resource, .cacheDirectory = cacheDirectory }, *lockData);
+    auto staged = pack::resource::stage(pack::resource::Options { .outDirectory = resource, .cacheDirectory = cacheDirectory,
+                                                                  .generatedHeaders = platformName.ends_with("arm64") }, *lockData);
     if (!staged) {
         std::println(std::cerr, "  staging the builtin headers failed: {}", staged.error().message);
         return {};

@@ -17,6 +17,9 @@ struct Options {
     std::string outDirectory;                 // replaced if it exists; gets include/ and LICENSE.TXT
     std::optional<std::string> sourceArchive; // an already-downloaded llvm-project source archive
     std::string cacheDirectory;               // where a fetched archive is cached
+    // The headers Clang's build generates (arm_neon.h, the other ARM and RISC-V intrinsics, 7 MB):
+    // for a payload whose host is ARM, whose projects are; an x64 payload stays within its size.
+    bool generatedHeaders { true };
 };
 
 struct Result {
