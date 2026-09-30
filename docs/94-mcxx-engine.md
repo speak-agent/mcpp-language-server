@@ -51,3 +51,8 @@ rounds; CI run 36634456673): with the fixture's readiness check first, the first
 13.77, 12.69 and 12.70 s (median 12.70 s; the clangd path's baseline was 87.8-126 s), the declaration
 itself answered 0.02 s after it was asked -- the time was the build description's. The job now runs
 `self-mcpp-first-jump`, which asks for the declaration as a user opening the project would: first.
+Its first run (CI run 36646514980) answered after 62.0-63.0 s: asked before any model had filled the
+native index, the native engine had nothing to answer from, and the request went on to the mcxx
+engine, which answered once it had built the modules. A jump or a hover asked before the first model
+now waits for it -- the scanned sources' model comes after 2.5 s when the build tool has not
+answered, and at most 8 s are waited -- and is then the native engine's like any other.

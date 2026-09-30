@@ -181,8 +181,10 @@ f::Imported DeclarationIndex::imported_by(const File& self, const Providers& pro
                 imported.declarations.push_back(d);
                 origin.emplace_back(g, k);
             }
+            // What it re-exports; a unit of the file's own module, what it imports too ([module.import]/7:
+            // an implementation unit sees what its interface imports).
             for (const auto& reexport : g->syntax.pp.imports)
-                if (reexport.exported) queue.push_back(reexport.name.starts_with(':') ? module + reexport.name : reexport.name);
+                if (reexport.exported || same) queue.push_back(reexport.name.starts_with(':') ? module + reexport.name : reexport.name);
         }
     }
     return imported;
