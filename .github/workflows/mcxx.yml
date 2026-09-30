@@ -620,3 +620,105 @@ jobs:
         with:
           name: mcxx-timing-${{ matrix.platform }}
           path: ${{ runner.temp }}/timing
+
+  # MS (AS.4.1, AS.4.2): mcppls built by MC++'s own compiler. libmc++'s mcxx is built and installed as
+  # mcpp's `llvm@23.1.0-mcxx` toolchain from libmc++'s xpkg (tools/checks/xlings.py, E-XL-1); this fork is
+  # built with it -- each program then says which compiler made it -- and its own tests (one program
+  # at a time: a dev test program is some 220 MB) and the linux-x64 fixtures run on what it built.
+  self-host:
+    name: built by mcxx (linux-x64)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: This fork
+        uses: actions/checkout@v4
+        with:
+          path: forks/mcpp-language-server
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mcxx-selfhost-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+          restore-keys: mcxx-selfhost-${{ runner.os }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: bash "$FORK/.github/scripts/install-mcpp.sh"
+      - name: Tools for the kit configure
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build libc6-dev linux-libc-dev
+      - name: mcxx, as mcpp's toolchain llvm@23.1.0-mcxx
+        run: |
+          set -euo pipefail
+          mcpp build -j auto
+          mcxx=$(realpath "$(find target -type f -name mcxx -path '*/bin/*' | head -1)")
+          headers=$(ls -d "$PWD"/.mcpp/.xlings/data/xpkgs/llvm-x-clang-dev/23.1.0.6/*/llvm/clang/lib/Headers | head -1)
+          python3 tools/checks/xlings.py --mcxx "$mcxx" --headers "$headers"
+          rm -rf target   # the driver is installed; its build is not needed again
+      - name: This fork, built with mcxx
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          mcpp build -j auto --toolchain llvm@23.1.0-mcxx
+          mcpp build -p devtools -j auto --toolchain llvm@23.1.0-mcxx
+          mkdir -p stage
+          for exe in mcppls mcppls-conformance mcppls-mock-mcpp mcppls-mock-model mcppls-devtools; do
+            cp "$(ls -t $(find target tools/devtools/target -type f -name "$exe" -path '*/bin/*') | head -1)" stage/
+          done
+          # What made them: MC++'s compiler (Clang 23.1 in mcxx), not the LLVM 22 toolchain.
+          for exe in stage/*; do readelf -p .comment "$exe" | tee /dev/stderr | grep -q 'clang version 23\.1'; done
+          stage/mcppls version
+      - name: Its tests, built with mcxx
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          failed=()
+          for t in $(ls tests/*.cpp | xargs -n1 basename | sed 's/\.cpp$//'); do
+            echo "::group::$t"
+            mcpp test --toolchain llvm@23.1.0-mcxx "$t" || failed+=("$t")
+            find target -path '*/bin/*' -name "$t" -type f -delete
+            echo "::endgroup::"
+          done
+          mcpp test --workspace --toolchain llvm@23.1.0-mcxx || failed+=(workspace)
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FORK }}/.payload-cache
+          key: payload-inputs-linux-x64-${{ hashFiles('forks/mcpp-language-server/packaging/payload.lock.json') }}
+      - name: The fixtures, on what mcxx built
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          stage/mcppls-devtools payload --server stage/mcppls --out payload --cache .payload-cache
+          stage/mcppls-devtools payload --verify payload
+          export CONFORMANCE_CLANGXX="$HOME/.mcpp/registry/data/xpkgs/xim-x-llvm/$LLVM_VERSION/bin/clang++"
+          failed=()
+          # The linux-x64 conformance job's four parts, one after the other.
+          for spec in $(python3 -c "import yaml; print(' '.join(i['fixtures'] for i in yaml.safe_load(open('.github/workflows/mcxx.yml'))['jobs']['conformance']['strategy']['matrix']['include']))"); do
+            name=${spec%@*}; extra=()
+            case "$spec" in
+              watch-polling|*@polling) extra+=(--no-dynamic-watch) ;;
+              *@plain) extra+=(--plain-client) ;;
+              *@vscode) extra+=(--client vscode) ;;
+              *@neovim) extra+=(--client neovim) ;;
+              *@zed) extra+=(--client zed) ;;
+            esac
+            [ "$name" = cmake-clang-bdb ] && continue   # needs the CMake the conformance job installs
+            echo "::group::$spec"
+            stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload \
+                --fixture "conformance/fixtures/$name" --timeout 180 ${extra[@]+"${extra[@]}"} || failed+=("$spec")
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
