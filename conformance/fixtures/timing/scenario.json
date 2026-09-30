@@ -1,10 +1,11 @@
 {
   "name": "timing",
-  "description": "Startup timing (usable plan W7): the inferred project, opened and navigated at once. Run cold, then warm with the same --workspace-dir and --cache-dir and --expect-warm; the measure file records initialize, ready, first diagnostics and first navigation.",
+  "description": "Startup timing (usable plan W7): the inferred project, opened and navigated at once. Run cold, then warm with the same --workspace-dir and --cache-dir and --expect-warm; the measure file records initialize, ready, first diagnostics and first navigation. T3 waits until the core engine has prepared the program (the references come from its program index, which has main.cpp once the modules it imports are built): an engine that answers T1 and T2 on its own would otherwise let the cold session end before std is built, and the warm session's SC4 find nothing to reuse.",
   "server-arguments": ["--no-discover"],
   "checks": [
     { "id": "T1-first-navigation", "kind": "definition", "file": "src/main.cpp", "at": [4, 31], "expect": "src/greet/greet.cppm" },
     { "id": "T2-module-navigation", "kind": "definition", "file": "src/main.cpp", "at": [1, 9], "expect": "src/greet/greet.cppm" },
+    { "id": "T3-prepared", "kind": "references-span", "file": "src/main.cpp", "at": [4, 31], "expect": ["src/main.cpp", "src/greet/greet.cppm"] },
     { "id": "SC4-std-reused", "kind": "module-cache-reused", "module": "std" }
   ]
 }
