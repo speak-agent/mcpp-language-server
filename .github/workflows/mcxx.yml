@@ -229,6 +229,21 @@ jobs:
         run: tar -xzf mcxx-linux-x64.tar.gz
       - name: Three cold starts of each
         run: bash .github/scripts/cold-starts.sh stage/mcppls-conformance stage/mcppls payload "$RUNNER_TEMP/self-mcpp"
+      # AS.3.1: the real projects' own fixtures, whole (the -first-jump variants' checks and the rest:
+      # the module graph, the stress), on the mcxx engine.
+      - name: The real projects' own fixtures (AS.3.1)
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          failed=()
+          for fixture in self-mcpp real-xlings self-mcppls; do
+            echo "::group::$fixture"
+            "stage/mcppls-conformance$exe" run --core-engine mcxx --server "stage/mcppls" --payload payload \
+                --fixture "conformance/fixtures/$fixture" --timeout 300 || failed+=("$fixture")
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -610,6 +625,21 @@ jobs:
         run: |
           exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
           bash .github/scripts/cold-starts.sh "stage/mcppls-conformance$exe" "payload/bin/mcppls$exe" payload "$RUNNER_TEMP/cold-starts"
+      # AS.3.1: the real projects' own fixtures, whole (the -first-jump variants' checks and the rest:
+      # the module graph, the stress), on the mcxx engine.
+      - name: The real projects' own fixtures (AS.3.1)
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          failed=()
+          for fixture in self-mcpp real-xlings self-mcppls; do
+            echo "::group::$fixture"
+            "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+                --fixture "conformance/fixtures/$fixture" --timeout 300 || failed+=("$fixture")
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
