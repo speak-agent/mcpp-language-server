@@ -265,8 +265,10 @@ jobs:
   # targets; the unit tests are cross-built too and run on the platforms' own runners. The payloads
   # are assembled (Windows' on Linux, macOS' on a macOS host with the cross-built packaging tool) and
   # the fixtures run on the platforms themselves.
+  # Release builds, from Linux: the other platforms' cross-built, linux-x64's too (what a release
+  # ships, and what AS.2.2 weighs; the build job's is a dev build, with debug information).
   cross-build:
-    name: cross-build from Linux (${{ matrix.target }})
+    name: release build from Linux (${{ matrix.target }})
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -275,6 +277,7 @@ jobs:
         include:
           - { target: x86_64-windows-gnu, exe: '.exe', format: 'PE32+ executable' }
           - { target: aarch64-macos,      exe: '',     format: 'Mach-O 64-bit arm64' }
+          - { target: x86_64-linux-gnu,   exe: '',     format: 'ELF 64-bit' }
     defaults:
       run:
         shell: bash
@@ -387,6 +390,7 @@ jobs:
         include:
           - { platform: win32-x64,    os: ubuntu-24.04, cross: x86_64-windows-gnu, exe: '.exe' }
           - { platform: darwin-arm64, os: macos-14,     cross: aarch64-macos,      exe: '' }
+          - { platform: linux-x64,    os: ubuntu-24.04, cross: x86_64-linux-gnu,   exe: '' }
     defaults:
       run:
         shell: bash
@@ -429,9 +433,25 @@ jobs:
           mkdir -p stage && cp built/cross/* stage/
           tar -czf mcxx-${{ matrix.platform }}.tar.gz payload stage
           du -sh payload/* mcxx-${{ matrix.platform }}.tar.gz
+      # AS.2.2: no larger than the payload before the switch -- upstream's last release with clangd
+      # (v0.0.6) for this platform: unpacked, and as the release archive (the payload alone, gzip).
+      - name: Size against the clangd payload (AS.2.2)
+        run: |
+          set -euo pipefail
+          base=https://github.com/Sunrisepeak/mcpp-language-server/releases/download/v0.0.6
+          curl -fsSL --retry 3 -o before.tar.gz "$base/payload-${{ matrix.platform }}.tar.gz"
+          mkdir -p before && tar -xzf before.tar.gz -C before
+          test -d before/payload/clangd
+          tar -czf after.tar.gz payload
+          size() { if [ "$RUNNER_OS" = macOS ]; then stat -f %z "$1"; else stat -c %s "$1"; fi; }
+          unpacked() { find "$1" -type f -print0 | xargs -0 cat | wc -c | tr -d ' '; }
+          read -r was is packed_was packed_is < <(echo "$(unpacked before/payload) $(unpacked payload) $(size before.tar.gz) $(size after.tar.gz)")
+          { echo "| payload (${{ matrix.platform }}) | v0.0.6, clangd | mcxx |"; echo "|---|---|---|"
+            echo "| unpacked | $was | $is |"; echo "| archive | $packed_was | $packed_is |"; } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$is" -gt "$was" ] || [ "$packed_is" -gt "$packed_was" ]; then echo "::error::the payload is larger than v0.0.6's"; exit 1; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: mcxx-${{ matrix.platform }}
+          name: mcxx-release-${{ matrix.platform }}
           path: mcxx-${{ matrix.platform }}.tar.gz
           retention-days: 7
 
@@ -464,7 +484,7 @@ jobs:
           case " ${{ matrix.fixtures }} " in *" mingw "*) mcpp toolchain install gcc 16.1.0 ;; esac
       - uses: actions/download-artifact@v4
         with:
-          name: mcxx-${{ matrix.platform }}
+          name: mcxx-release-${{ matrix.platform }}
       - name: Unpack
         run: |
           tar -xzf mcxx-${{ matrix.platform }}.tar.gz && ls payload stage
@@ -501,3 +521,99 @@ jobs:
           }
           start
           start --expect-warm
+
+  # MS (AS.3.2, AS.3.4): what release-checks.yml asks of a release, on the mcxx engine and its payload
+  # (no clangd), on each platform: five cold and five warm starts of the timing fixture, their medians
+  # of first navigation under 12 s and 5 s; the stability fixtures, three rounds in a row, one failure
+  # in any round a failure. On a push: a pull request's run is the same commit's.
+  release-gates:
+    name: release gates (${{ matrix.platform }}${{ matrix.part && format(', {0}', matrix.part) || '' }}, mcxx)
+    needs: payload-cross
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        # release-checks.yml's stability fixtures and parts; the timing in the first part.
+        include:
+          - platform: linux-x64
+            part: 1 of 2
+            os: ubuntu-24.04
+            timing: true
+            fixtures: mcpp-split multi-root mcpp-llvm mcpp-watch inferred module-faults
+          - platform: linux-x64
+            part: 2 of 2
+            os: ubuntu-24.04
+            fixtures: verify-changes mcpp-all-cppm mcpp-watch@polling mcpp-emit-hang mcpp-emit-watch
+          - platform: darwin-arm64
+            os: macos-14
+            timing: true
+            fixtures: inferred module-faults verify-changes multi-root mcpp-llvm mcpp-split mcpp-all-cppm mcpp-watch
+          - platform: win32-x64
+            part: 1 of 2
+            os: windows-2022
+            timing: true
+            fixtures: mcpp-split inferred module-faults mcpp-watch
+          - platform: win32-x64
+            part: 2 of 2
+            os: windows-2022
+            fixtures: verify-changes mcpp-all-cppm multi-root mcpp-emit-hang
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mcpp
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-release-${{ matrix.platform }}
+      - name: Unpack
+        run: |
+          tar -xzf mcxx-${{ matrix.platform }}.tar.gz && ls payload stage
+          if [ "$RUNNER_OS" = macOS ]; then for f in stage/* payload/bin/*; do [ -f "$f" ] && [ -x "$f" ] && codesign -s - -f "$f" || true; done; fi
+      - name: Five cold and warm starts (AS.3.2)
+        if: matrix.timing
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          results="$RUNNER_TEMP/timing"
+          rm -rf "$results"; mkdir -p "$results"
+          for round in 1 2 3 4 5; do
+            for start in cold warm; do
+              warm=(); [ "$start" = warm ] && warm=(--expect-warm)
+              "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+                  --fixture conformance/fixtures/timing \
+                  --workspace-dir "$RUNNER_TEMP/timing-$round/workspace" --cache-dir "$RUNNER_TEMP/timing-$round/cache" \
+                  --timeout 120 --measure "$results/$start-$round.json" ${warm[@]+"${warm[@]}"}
+            done
+          done
+          "stage/mcppls-devtools$exe" measure summary "$results" --max-cold 12 --max-warm 5 \
+              | tee "$results/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Three rounds (AS.3.4)
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          failed=''
+          for round in 1 2 3; do
+            for spec in ${{ matrix.fixtures }}; do
+              name=${spec%@*}; extra=()
+              case "$spec" in *@polling) extra+=(--no-dynamic-watch) ;; esac
+              echo "::group::round $round: $spec"
+              started=$(date +%s)
+              if ! "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+                     --fixture "conformance/fixtures/$name" --timeout 180 ${extra[@]+"${extra[@]}"}; then
+                failed="$failed round-$round:$spec"
+              fi
+              echo "::endgroup::"
+              echo "round $round $spec $(( $(date +%s) - started )) s" | tee -a "$RUNNER_TEMP/stability.txt"
+            done
+          done
+          { echo "| round | fixture | seconds |"; echo "|---|---|---|"
+            awk '{ printf "| %s | %s | %s |\n", $2, $3, $4 }' "$RUNNER_TEMP/stability.txt"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$failed" ]; then echo "::error::failed:$failed"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.timing
+        with:
+          name: mcxx-timing-${{ matrix.platform }}
+          path: ${{ runner.temp }}/timing

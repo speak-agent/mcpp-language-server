@@ -56,3 +56,21 @@ native index, the native engine had nothing to answer from, and the request went
 engine, which answered once it had built the modules. A jump or a hover asked before the first model
 now waits for it -- the scanned sources' model comes after 2.5 s when the build tool has not
 answered, and at most 8 s are waited -- and is then the native engine's like any other.
+
+## A release's gates on the mcxx engine (MS)
+
+What `release-checks.yml` asks of a release, the mcxx workflow asks of the mcxx engine and its
+payload, built for release on each platform (`release build from Linux` for linux-x64 too, whose
+build job is a dev build):
+
+- **The payload's size (AS.2.2)**: `payload (<platform>, mcxx)` compares the payload with the last
+  release that carried clangd (v0.0.6's `payload-<platform>.tar.gz`): unpacked, and as an archive of
+  the payload alone; larger fails. Unpacked, v0.0.6's darwin-arm64 payload is 101 MB (clangd 78 MB),
+  the mcxx one 77 MB (the server 53 MB, Clang in it); win32-x64 175 MB and 172 MB (the kit, 102 MB, is
+  the same in both).
+- **Start-up (AS.3.2)**: `release gates` starts the timing fixture five times cold and five times warm;
+  the medians of the first navigation must be under 12 s and 5 s (`mcppls-devtools measure summary`).
+- **Stability (AS.3.4)**: the same job runs release-checks' stability fixtures three rounds in a row;
+  one failure in any round fails it.
+
+They run on a push (a pull request's run is of the same commit).
