@@ -34,7 +34,16 @@ answers only what it is sure of: the declarations of what the name names, and fo
 one it has read (a class's body, an inline function, a variable). A name `std` declares, a member of a
 type it cannot tell, an overload it would have to choose, a function defined in a unit no importer
 reads: null, and the mcxx engine answers. So the first jump in a project that has not been built is
-answered at once rather than after the modules it imports are built. Checked by
+answered at once rather than after the modules it imports are built.
+
+A hover and a completion are the native engine's the same way (A2.3.1: their declaration part). A hover
+over a name the front end resolves shows its declaration as C++ writes it -- a function's return type,
+qualified name and parameters' types (`int cli::run(int)`), a variable's or a member's type, a class's
+bases, an alias's type -- and the file it is declared in; a type the front end deduces (`auto`) is not
+shown, the engine's hover answers then. After a member access or a qualification being typed (`o.`,
+`p->na`, `cli::`) the completion lists the members of the object's class (its bases' too) or of the
+scope, from `mcxx::frontend::members_at`; an object whose class the front end cannot tell is the
+engine's. An `import` line's completion is the module names, as before. Checked by
 `tests/test_native_declarations.cpp`.
 
 Measured by the mcxx workflow's `self-mcpp` job (the mcpp repository, about 170 modules, cold, three

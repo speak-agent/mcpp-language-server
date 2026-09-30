@@ -68,6 +68,38 @@ int main() {
         expect(index.definition("/p/main.cpp", Position { 3, 57 }).is_null());
     };
 
+    "a hover shows the declaration the front end resolves, and where it is declared"_test = [&] {
+        const auto value = [&](Position at) {
+            const Json hover = index.hover("/p/main.cpp", at);
+            return hover.is_object() ? hover.at("contents").value("value", std::string {}) : std::string {};
+        };
+        expect(value(Position { 3, 16 }).find("int cli::run(int)") != std::string::npos &&
+               value(Position { 3, 16 }).find("Declared in `cli.cppm`") != std::string::npos) << value(Position { 3, 16 });
+        expect(value(Position { 2, 9 }).find("struct cli::Options") != std::string::npos) << "a class: " << value(Position { 2, 9 });
+        expect(value(Position { 3, 41 }).find("int cli::Options::verbose") != std::string::npos) << "a member: " << value(Position { 3, 41 });
+        expect(value(Position { 3, 20 }).find("int argc") != std::string::npos) << "a parameter: " << value(Position { 3, 20 });
+        expect(index.hover("/p/main.cpp", Position { 3, 57 }).is_null()) << "a name std declares: the engine's";
+    };
+
+    "a completion after a member access or a qualification offers the members the front end knows"_test = [&] {
+        const auto labels = [&](std::string text, Position at) -> std::optional<std::vector<std::string>> {
+            index.update("/p/use.cpp", text);
+            const Json list = index.completion("/p/use.cpp", text, at);
+            if (!list.is_object()) return std::nullopt;
+            std::vector<std::string> out;
+            for (const auto& item : list.at("items")) out.push_back(item.at("label").get<std::string>());
+            std::ranges::sort(out);
+            return out;
+        };
+        using V = std::vector<std::string>;
+        expect(labels("import cli;\nint use() {\n    cli::Options o { 1 };\n    o.\n    return 0;\n}\n", Position { 3, 6 }) == V { "verbose" })
+            << "an object's class, from the interface's source";
+        expect(labels("import cli;\nint use() {\n    cli::\n    return 0;\n}\n", Position { 2, 9 }) == V { "Options", "run", "twice" })
+            << "a namespace an import declares";
+        expect(labels("import cli;\nint use(int n) {\n    n.\n    return 0;\n}\n", Position { 2, 6 }) == std::nullopt) << "not a class: the engine's";
+        index.remove("/p/use.cpp");
+    };
+
     "an edit is what is answered next"_test = [&] {
         index.update("/p/cli.cppm", "export module cli;\n"
                                     "export namespace cli {\n"

@@ -57,6 +57,8 @@ private:
     std::uint64_t structure_ { 0 };
     const std::vector<Candidate>& candidates_now_() const;
     void structure_changed_();
+    // The files of a module's interface units, for the declarations a file imports.
+    DeclarationIndex::Providers interface_files() const;
 
 public:
     void update(std::string_view path, std::string_view text);
@@ -75,9 +77,10 @@ public:
     std::uint64_t structure_generation() const { return structure_; }
 
     std::optional<ModuleHit> module_at(std::string_view path, base::Position position) const;
-    // Each returns null when the position is not one this index answers for. definition() and
-    // declaration(): a module name, or (M2.3) a name MC++'s own front end resolves for certain from
-    // the file and the sources of the interfaces it imports.
+    // Each returns null when the position is not one this index answers for. definition(),
+    // declaration() and hover(): a module name, or (M2.3) a name MC++'s own front end resolves for
+    // certain from the file and the sources of the interfaces it imports; completion(): an import's
+    // module name, or (M2.3) the members after a member access or a qualification the front end knows.
     nlohmann::json definition(std::string_view path, base::Position position) const;
     nlohmann::json declaration(std::string_view path, base::Position position) const;
     nlohmann::json hover(std::string_view path, base::Position position) const;

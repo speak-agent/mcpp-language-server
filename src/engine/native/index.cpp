@@ -207,24 +207,22 @@ std::optional<ModuleHit> ModuleIndex::module_at(std::string_view path, base::Pos
     return std::nullopt;
 }
 
-Json ModuleIndex::declaration(std::string_view path, base::Position position) const {
-    if (module_at(path, position)) return definition(path, position);
-    return declarations_.find(path, position_json(position), false, [this](std::string_view name) {
+DeclarationIndex::Providers ModuleIndex::interface_files() const {
+    return [this](std::string_view name) {
         std::vector<std::string> paths;
         for (const auto& unit : providers(name)) paths.push_back(unit.path);
         return paths;
-    });
+    };
+}
+
+Json ModuleIndex::declaration(std::string_view path, base::Position position) const {
+    if (module_at(path, position)) return definition(path, position);
+    return declarations_.find(path, position_json(position), false, interface_files());
 }
 
 Json ModuleIndex::definition(std::string_view path, base::Position position) const {
     const auto hit = module_at(path, position);
-    if (!hit) {
-        return declarations_.find(path, position_json(position), true, [this](std::string_view name) {
-            std::vector<std::string> paths;
-            for (const auto& unit : providers(name)) paths.push_back(unit.path);
-            return paths;
-        });
-    }
+    if (!hit) return declarations_.find(path, position_json(position), true, interface_files());
     Json locations = Json::array();
     std::string target { hit->name };
     // An implementation unit's declaration names its primary interface.
@@ -244,7 +242,8 @@ Json ModuleIndex::definition(std::string_view path, base::Position position) con
 
 Json ModuleIndex::hover(std::string_view path, base::Position position) const {
     const auto hit = module_at(path, position);
-    if (!hit) return nullptr;
+    // A name the file writes: its declaration, when the front end is sure of what it names (E-LS-4).
+    if (!hit) return declarations_.hover(path, position_json(position), interface_files());
     std::string value { std::format("```cpp\nmodule {}\n```\n", hit->name) };
     const auto units = providers(hit->name);
     if (!units.empty()) {
@@ -273,14 +272,16 @@ Json ModuleIndex::completion(std::string_view path, std::string_view text, base:
         return text;
     };
     std::string_view rest { trim_left(line) };
+    // Not an import: what may follow a member access or a qualification, the front end's (E-LS-4).
+    const auto members = [&] { return declarations_.completion(path, position_json(position), interface_files()); };
     if (rest.starts_with("export")) {
         rest.remove_prefix(6);
-        if (rest.empty() || (rest.front() != ' ' && rest.front() != '\t')) return nullptr;
+        if (rest.empty() || (rest.front() != ' ' && rest.front() != '\t')) return members();
         rest = trim_left(rest);
     }
-    if (!rest.starts_with("import")) return nullptr;
+    if (!rest.starts_with("import")) return members();
     rest.remove_prefix(6);
-    if (rest.empty() || (rest.front() != ' ' && rest.front() != '\t')) return nullptr;
+    if (rest.empty() || (rest.front() != ' ' && rest.front() != '\t')) return members();
     const std::string_view partial { trim_left(rest) };
     if (!std::ranges::all_of(partial, [](char c) { return base::is_identifier_char(c) || c == '.' || c == ':'; })) return nullptr;
     const std::size_t partialStart { *offset - partial.size() };
