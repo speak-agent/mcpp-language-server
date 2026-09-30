@@ -1,0 +1,69 @@
+{
+  "name": "real-xlings-first-jump",
+  "description": "A2.3.3: real-xlings's repository and preparation (the xlings repository at its fixed commit, about 110 modules), opened cold, and the jump from its import of xlings.cli asked as the first request -- a cold start's first jump, as a user opening the project makes it, answered by the native engine while the build description is read. Then real-xlings's own checks but the stress (its S1 given 300 s: on the mcxx engine, readiness is every module built), so that the server is otherwise what it is. Its first-navigation is what the mcxx workflow's cold-start job times; real-xlings asks for readiness first (its S1), which on the mcxx engine is every module built.",
+  "prepare": [
+    [
+      "git",
+      "init",
+      "-q"
+    ],
+    [
+      "git",
+      "fetch",
+      "-q",
+      "--depth",
+      "1",
+      "https://github.com/openxlings/xlings.git",
+      "84572b0cc8502a16afaa4ae00867aef17f18c2c2"
+    ],
+    [
+      "git",
+      "checkout",
+      "-q",
+      "FETCH_HEAD"
+    ],
+    [
+      "mcpp",
+      "emit",
+      "build-database"
+    ]
+  ],
+  "checks": [
+    {
+      "id": "M1-import-cli",
+      "kind": "definition",
+      "file": "src/main.cpp",
+      "at": [
+        2,
+        7
+      ],
+      "expect": "src/cli.cppm"
+    },
+    {
+      "id": "S1",
+      "kind": "status",
+      "source": "mcpp",
+      "tier": 1,
+      "timeout": 300
+    },
+    {
+      "id": "C1-platform-call",
+      "kind": "definition-any",
+      "file": "src/main.cpp",
+      "at": [
+        33,
+        22
+      ]
+    },
+    {
+      "id": "C2-hover",
+      "kind": "hover-contains",
+      "file": "src/main.cpp",
+      "at": [
+        33,
+        22
+      ],
+      "expect": "init_console_output"
+    }
+  ]
+}

@@ -194,7 +194,9 @@ jobs:
   # times, a declaration the first request (self-mcpp-first-jump); the first navigation's time since the
   # server started, and its median. The native engine answers it from the imported interfaces' sources
   # (M2.3) while the build description is read and the mcxx engine prepares. A2.3.3: the same for
-  # real-xlings and self-mcppls, whose baselines (the clangd path) are 12.3 s and 15.1 s.
+  # real-xlings and self-mcppls (their -first-jump variants: the fixtures ask for readiness first,
+  # which on the mcxx engine is every module built), whose baselines (the clangd path) are 12.3 s and
+  # 15.1 s. The server logs are kept with the timings.
   self-mcpp:
     name: cold starts (linux-x64, mcxx)
     needs: build
@@ -230,17 +232,18 @@ jobs:
           set -euo pipefail
           results="$RUNNER_TEMP/self-mcpp"
           mkdir -p "$results"
-          for fixture in self-mcpp-first-jump real-xlings self-mcppls; do
+          for fixture in self-mcpp-first-jump real-xlings-first-jump self-mcppls-first-jump; do
             for round in 1 2 3; do
               stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload --fixture "conformance/fixtures/$fixture" \
-                  --workspace-dir "$RUNNER_TEMP/$fixture-$round/workspace" --cache-dir "$RUNNER_TEMP/$fixture-$round/cache" --timeout 900 \
+                  --workspace-dir "$RUNNER_TEMP/$fixture-$round/workspace" --cache-dir "$RUNNER_TEMP/$fixture-$round/cache" --timeout 300 \
                   --measure "$results/$fixture-cold-$round.json" || true
+              mkdir -p "$results/logs/$fixture-$round" && cp "$RUNNER_TEMP/$fixture-$round/cache/logs/"*.log "$results/logs/$fixture-$round/" 2>/dev/null || true
             done
           done
           python3 - "$results" >> "$GITHUB_STEP_SUMMARY" <<'PY'
           import json, pathlib, statistics, sys
           # The criterion each is held to: A2.3.2's 10 s, A2.3.3's baselines (the clangd path).
-          limits = { "self-mcpp-first-jump": 10.0, "real-xlings": 12.3, "self-mcppls": 15.1 }
+          limits = { "self-mcpp-first-jump": 10.0, "real-xlings-first-jump": 12.3, "self-mcppls-first-jump": 15.1 }
           for fixture, limit in limits.items():
               runs = [json.loads(p.read_text()) for p in sorted(pathlib.Path(sys.argv[1]).glob(f"{fixture}-cold-*.json"))]
               print(f"### {fixture} (at most {limit} s)\n\n| round | first navigation (s) | ready (s) | failures |\n|---|---|---|---|")
