@@ -244,17 +244,28 @@ jobs:
           import json, pathlib, statistics, sys
           # The criterion each is held to: A2.3.2's 10 s, A2.3.3's baselines (the clangd path).
           limits = { "self-mcpp-first-jump": 10.0, "real-xlings-first-jump": 12.3, "self-mcppls-first-jump": 15.1 }
+          # A gate, not only a table: a round whose checks failed (real-xlings' definitions answered []
+          # for 300 s went unnoticed while this only measured), or a median over its limit, fails the job.
+          missed = []
           for fixture, limit in limits.items():
               runs = [json.loads(p.read_text()) for p in sorted(pathlib.Path(sys.argv[1]).glob(f"{fixture}-cold-*.json"))]
               print(f"### {fixture} (at most {limit} s)\n\n| round | first navigation (s) | ready (s) | failures |\n|---|---|---|---|")
               for i, r in enumerate(runs, 1):
                   print(f"| {i} | {r.get('first-navigation')} | {r.get('ready')} | {r.get('failures')} |")
+                  if r.get("failures"):
+                      missed.append(f"{fixture} round {i}: {r.get('failures')} failures")
               known = [r.get("first-navigation") for r in runs if isinstance(r.get("first-navigation"), (int, float))]
               if runs and len(known) == len(runs):
                   median = statistics.median(known)
                   print(f"\nmedian first navigation: {median:.2f} s ({'within' if median <= limit else 'over'} {limit} s)\n")
+                  if median > limit:
+                      missed.append(f"{fixture}: median {median:.2f} s over {limit} s")
               else:
                   print("\na round never navigated\n")
+                  missed.append(f"{fixture}: a round never navigated")
+          for m in missed:
+              print(m, file=sys.stderr)
+          sys.exit(1 if missed else 0)
           PY
       - uses: actions/upload-artifact@v4
         if: always()
