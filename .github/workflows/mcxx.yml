@@ -792,6 +792,8 @@ jobs:
           set -euo pipefail
           stage/mcppls-devtools payload --server stage/mcppls --out payload --cache .payload-cache
           stage/mcppls-devtools payload --verify payload
+          # mcpp-gcc and mcpp-split-gcc describe their projects with GCC, as the conformance parts install it.
+          mcpp toolchain install gcc 16.1.0
           export CONFORMANCE_CLANGXX="$HOME/.mcpp/registry/data/xpkgs/xim-x-llvm/$LLVM_VERSION/bin/clang++"
           failed=()
           # The linux-x64 conformance job's four parts, one after the other.
