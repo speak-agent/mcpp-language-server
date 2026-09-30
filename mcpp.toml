@@ -90,7 +90,7 @@ microsoft = { path = "../../index/microsoft" }
 openkal-llvm-runtime.workspace = true
 # The C library, from speak-agent's fork, as libmc++'s own root names it: dlopen in a static program,
 # for MC4's plugin libraries (`library = "..."`), which the editor loads as a compile does.
-openkal-musl                   = { git = "https://github.com/speak-agent/openkal-musl.git", tag = "0.19.7" }
+openkal-musl                   = { git = "https://github.com/speak-agent/openkal-musl.git", tag = "0.19.8" }
 cmdline.workspace              = true
 mcppls-base                    = { path = "modules/base" }
 mcppls-platform                = { path = "modules/platform" }
