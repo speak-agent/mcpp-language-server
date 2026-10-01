@@ -405,6 +405,188 @@ jobs:
             ${{ env.FORK }}/unit
           retention-days: 7
 
+  # MX (any host to any target, mcppls built with mc++): mcxx for the macOS and Windows hosts, cross-built
+  # here as libmc++'s own CI does (its mcxx-cross job), with Clang's builtin headers beside it.
+  mcxx-hosts:
+    name: mcxx for the ${{ matrix.host }} host
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: darwin-arm64, target: aarch64-macos,      exe: mcxx }
+          - { host: win32-x64,    target: x86_64-windows-gnu, exe: mcxx.exe }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mcxx-host-${{ matrix.target }}-${{ env.MCPP_VERSION }}-${{ hashFiles('index/**', '**/mcpp.toml') }}
+          restore-keys: mcxx-host-${{ matrix.target }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do xlings install "mcpp@$MCPP_VERSION" -y -g && break; sleep 20; done
+          mcpp self config --mirror GLOBAL
+          mcpp toolchain install llvm "$LLVM_VERSION"
+          mcpp toolchain default "llvm@$LLVM_VERSION"
+      - name: mcxx for ${{ matrix.host }}
+        run: |
+          set -euo pipefail
+          target=${{ matrix.target }}
+          mcpp build --profile release --target "$target"
+          out="$PWD/mcxx-host"; mkdir -p "$out/headers"
+          cp "$(ls -t $(find "target/$target" -type f -name '${{ matrix.exe }}' -path '*/bin/*') | head -1)" "$out/${{ matrix.exe }}"
+          headers=$(ls -d "$PWD"/.mcpp/.xlings/data/xpkgs/llvm-x-clang-dev/*/*/llvm/clang/lib/Headers | tail -1)
+          cp -R "$headers"/. "$out/headers/"
+          cp "$headers"/../../../../llvm-generated/clang-lib/Headers/* "$out/headers/"
+          ls -la "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcxx-host-${{ matrix.host }}
+          path: mcxx-host
+          retention-days: 7
+
+  # MX: on each host, mc++ installed through libmc++'s xpkg (E-XIM-3) is mcpp's toolchain, and mcppls'
+  # release is built for each target from there -- openkal's cross building: no target SDK, no Xcode
+  # or MSVC used. aarch64-linux-gnu waits for E-OK-3 (compiler-rt's builtins for it in
+  # openkal-llvm-runtime); linux-x64 as a host is the cross-build job above.
+  cross-build-hosts:
+    name: release build from ${{ matrix.host }} (${{ matrix.target }})
+    needs: mcxx-hosts
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [darwin-arm64, win32-x64]
+        target: [x86_64-linux-gnu, aarch64-macos, x86_64-windows-gnu]
+        include:
+          - { host: darwin-arm64, os: macos-14,     mcxx: mcxx }
+          - { host: win32-x64,    os: windows-2022, mcxx: mcxx.exe }
+          - { target: x86_64-linux-gnu,   platform: linux-x64,    exe: '',     magic: '7f454c46' }
+          - { target: aarch64-macos,      platform: darwin-arm64, exe: '',     magic: 'cffaedfe' }
+          - { target: x86_64-windows-gnu, platform: win32-x64,    exe: '.exe', magic: '4d5a' }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: This fork
+        uses: actions/checkout@v4
+        with:
+          path: forks/mcpp-language-server
+      - name: xlings (macOS)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - name: xlings (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://d2learn.org/xlings-install.ps1.txt | iex
+          "$env:USERPROFILE\.xlings\subos\current\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mx-${{ matrix.host }}-${{ matrix.target }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+          restore-keys: mx-${{ matrix.host }}-${{ matrix.target }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do xlings install "mcpp@$MCPP_VERSION" -y -g && break; sleep 20; done
+          mcpp self config --mirror GLOBAL
+          for attempt in 1 2 3; do mcpp toolchain install llvm "$LLVM_VERSION" && break; sleep 20; done
+          mcpp toolchain default "llvm@$LLVM_VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-host-${{ matrix.host }}
+          path: mcxx-host
+      # AX.1: installed through xlings from libmc++'s xpkg, and mcpp lists the toolchain.
+      - name: mc++ as mcpp's toolchain on ${{ matrix.host }}
+        run: |
+          set -euo pipefail
+          chmod +x "mcxx-host/${{ matrix.mcxx }}"
+          py=$(command -v python3 || command -v python)
+          "$py" tools/checks/xlings.py --mcxx "mcxx-host/${{ matrix.mcxx }}" --headers mcxx-host/headers
+      # AX.2, AX.5: built by mc++ for the target, nothing of the target's SDK on this host.
+      - name: mcppls for ${{ matrix.target }}
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          mcpp build -j auto --profile release --target ${{ matrix.target }} --toolchain llvm@23.1.0-mcxx 2>&1 | tee build.log
+          grep -q 'Resolved llvm@23.1.0-mcxx' build.log
+          mkdir -p mx
+          for exe in mcppls mcppls-conformance; do
+            path=$(ls -t $(find target -type f -name "$exe${{ matrix.exe }}" -path '*/${{ matrix.target }}/*/bin/*') | head -1)
+            magic=$(od -An -tx1 -N4 "$path" | tr -d ' \n')
+            echo "$path: $magic"
+            case "$magic" in ${{ matrix.magic }}*) ;; *) echo "::error::$path is not a ${{ matrix.target }} program ($magic)"; exit 1 ;; esac
+            cp "$path" mx/
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mx-${{ matrix.platform }}-from-${{ matrix.host }}
+          path: ${{ env.FORK }}/mx
+          retention-days: 7
+
+  # AX.3 (a first part): what each host built runs on its target and says what it is.
+  run-cross-hosts:
+    name: run on ${{ matrix.platform }} what ${{ matrix.host }} built
+    needs: cross-build-hosts
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [darwin-arm64, win32-x64]
+        platform: [linux-x64, darwin-arm64, win32-x64]
+        include:
+          - { platform: linux-x64,    os: ubuntu-24.04, exe: '' }
+          - { platform: darwin-arm64, os: macos-14,     exe: '' }
+          - { platform: win32-x64,    os: windows-2022, exe: '.exe' }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mx-${{ matrix.platform }}-from-${{ matrix.host }}
+          path: mx
+      - name: It starts and says its version
+        run: |
+          set -euo pipefail
+          chmod +x mx/* || true
+          if [ "$RUNNER_OS" = macOS ]; then for f in mx/*; do codesign -s - -f "$f"; done; fi
+          ./mx/mcppls${{ matrix.exe }} version --json | tee version.json
+          ./mx/mcppls-conformance${{ matrix.exe }} --help | head -5
+
   # The cross-built tests on the platforms themselves (on Windows, not under wine: the repository
   # checks there ask git, which a Windows runner has).
   unit-cross:
