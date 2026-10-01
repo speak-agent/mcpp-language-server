@@ -759,6 +759,23 @@ jobs:
           { echo "| round | fixture | seconds |"; echo "|---|---|---|"
             awk '{ printf "| %s | %s | %s |\n", $2, $3, $4 }' "$RUNNER_TEMP/stability.txt"; } >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$failed" ]; then echo "::error::failed:$failed"; exit 1; fi
+      # What a failure leaves to read: verify-changes once more, when this row runs it, with the module
+      # store and the index traced (MCXX_LOG, the server at debug); the logs into an artifact.
+      - name: On a failure, verify-changes traced
+        if: failure() && contains(matrix.fixtures, 'verify-changes')
+        run: |
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          cp -r conformance/fixtures/verify-changes "$RUNNER_TEMP/traced-fixture"
+          py=$(command -v python3 || command -v python)
+          "$py" -c "import json, sys; p = sys.argv[1]; d = json.load(open(p)); d['server-arguments'] = ['--log-level', 'debug']; json.dump(d, open(p, 'w'))" \
+              "$RUNNER_TEMP/traced-fixture/scenario.json"
+          MCXX_LOG=modules=debug,index=debug "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+              --fixture "$RUNNER_TEMP/traced-fixture" --workspace-dir "$RUNNER_TEMP/traced/workspace" --cache-dir "$RUNNER_TEMP/traced/cache" --timeout 180 || true
+      - uses: actions/upload-artifact@v4
+        if: failure() && contains(matrix.fixtures, 'verify-changes')
+        with:
+          name: release-gates-traced-${{ matrix.platform }}${{ matrix.part && format('-{0}', matrix.part == '1 of 2' && '1' || '2') || '' }}
+          path: ${{ runner.temp }}/traced/cache/logs
       - uses: actions/upload-artifact@v4
         if: always() && matrix.timing
         with:
