@@ -539,8 +539,24 @@ private:
     std::unique_ptr<lsp::Connection> connection_;
     std::shared_ptr<mcppls::platform::Channel<Json>> inbox_ { std::make_shared<mcppls::platform::Channel<Json>>() };
     std::int64_t nextId_ { 1 };
+    // Its last lines on standard error, for when it ends: a crash's own report is there.
+    struct Tail {
+        std::mutex mutex;
+        std::deque<std::string> lines;
+    };
+    std::shared_ptr<Tail> tail_ { std::make_shared<Tail>() };
 
 public:
+    // Empty while it runs; how it ended, and its last words, once it has.
+    std::string ended() const {
+        if (!inbox_->closed() || inbox_->size() != 0 || !connection_) return {};
+        const auto code = connection_->exit_code();
+        std::string out { code ? std::format("mcppls mcp exited with status {}", *code) : std::string { "mcppls mcp closed its output" } };
+        std::lock_guard lock { tail_->mutex };
+        for (const auto& line : tail_->lines) out += "\n      | " + line;
+        return out;
+    }
+
     base::Result<void> start(const Options& options, const std::vector<std::string>& serverArguments, const std::string& workspace,
                              const std::string& cacheDirectory, bool daemon) {
         mcppls::platform::SpawnOptions spawn;
@@ -558,10 +574,14 @@ public:
         spawn.environment = std::move(environment);
         const bool verbose { options.verbose };
         auto inbox = inbox_;
+        auto tail = tail_;
         auto connection = lsp::Connection::start(
             std::move(spawn), [inbox](Json message) { inbox->push(std::move(message)); }, [inbox] { inbox->close(); },
-            [verbose](std::string_view line) {
+            [verbose, tail](std::string_view line) {
                 if (verbose) say("  mcp: {}", line);
+                std::lock_guard lock { tail->mutex };
+                tail->lines.emplace_back(line);
+                if (tail->lines.size() > 20) tail->lines.pop_front();
             },
             lsp::Framing::lines);
         if (!connection) return std::unexpected { connection.error() };
@@ -1212,7 +1232,10 @@ public:
             do {
                 const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - Clock::now());
                 const auto response = mcp->request(method, params, std::max(std::chrono::seconds { 1 }, remaining), [this] { client_.drain(std::chrono::milliseconds { 0 }); });
-                if (!response) break;
+                if (!response) {
+                    if (const std::string end { mcp->ended() }; !end.empty()) why = end;
+                    break;
+                }
                 Json value = response->value("result", Json {});
                 bool isError { false };
                 if (method == "tools/call") {
