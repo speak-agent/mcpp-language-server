@@ -598,8 +598,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macos-15, as xlings' own macOS job: on macos-14, mcpp links the build.mcpp of xlings'
+          # mcpplibs.xpkg against the system's libc++, which has no std::print terminal check
+          # (std::__1::__is_posix_terminal), and real-xlings is never prepared.
           - platform: darwin-arm64
-            os: macos-14
+            os: macos-15
           - platform: win32-x64
             os: windows-2022
     defaults:
@@ -640,6 +643,26 @@ jobs:
             echo "::endgroup::"
           done
           if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+      # What a failure leaves to read: self-mcppls' cold start once more, the module store and the
+      # index traced (MCXX_LOG, the server at debug), and on macOS the system's crash reports.
+      - name: On a failure, self-mcppls traced, and the crash reports
+        if: failure()
+        run: |
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          out="$RUNNER_TEMP/cold-starts/traced"; mkdir -p "$out"
+          cp -r conformance/fixtures/self-mcppls-first-jump "$RUNNER_TEMP/traced-fixture"
+          py=$(command -v python3 || command -v python)
+          "$py" -c "import json, sys; p = sys.argv[1]; d = json.load(open(p)); d['server-arguments'] = ['--log-level', 'debug']; json.dump(d, open(p, 'w'))" \
+              "$RUNNER_TEMP/traced-fixture/scenario.json"
+          MCXX_LOG=modules=debug,index=debug "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+              --fixture "$RUNNER_TEMP/traced-fixture" --workspace-dir "$RUNNER_TEMP/traced/workspace" --cache-dir "$RUNNER_TEMP/traced/cache" --timeout 300 || true
+          cp "$RUNNER_TEMP/traced/cache/logs/"*.log "$out/" 2>/dev/null || true
+          if [ "$RUNNER_OS" = macOS ]; then
+            for f in ~/Library/Logs/DiagnosticReports/mcppls*; do
+              [ -f "$f" ] || continue
+              cp "$f" "$out/"; echo "::group::$f"; head -150 "$f"; echo "::endgroup::"
+            done
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
