@@ -167,10 +167,12 @@ public:
         ++generation_;
         // The database as a compile_commands.json where the clangd engine keeps its own: what a
         // diagnostic bundle and a person debugging read. libmc++ is given the commands directly.
-        std::string database { normalize::to_compile_commands(*plan, false).dump(2) };
-        post_([this, commands = std::move(commands), stubs = std::move(stubs), database = std::move(database)]() mutable {
-            (void)fs::create_directories(databaseDirectory_);
-            (void)fs::write_file_atomic(base::join_path(databaseDirectory_, "compile_commands.json"), database);
+        // Written here, not on the engine's queue: behind a parse that waits for a module build, the
+        // queue reached it seconds later, and a bundle asked for meanwhile had no database (win32-x64,
+        // diagnostic-bundle's B3: std took 5 s to build).
+        (void)fs::create_directories(databaseDirectory_);
+        (void)fs::write_file_atomic(base::join_path(databaseDirectory_, "compile_commands.json"), normalize::to_compile_commands(*plan, false).dump(2));
+        post_([this, commands = std::move(commands), stubs = std::move(stubs)]() mutable {
             if (!stubs.empty()) (void)fs::create_directories(stubDirectory_);
             for (const auto& [file, content] : stubs)
                 if (fs::read_file(file).value_or("") != content) (void)fs::write_file(file, content);
