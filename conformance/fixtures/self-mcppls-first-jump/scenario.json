@@ -1,0 +1,69 @@
+{
+  "name": "self-mcppls-first-jump",
+  "description": "A2.3.3: self-mcppls's repository and preparation (mcpp-language-server at 5e4bdec, about 90 modules), opened cold, and the declaration of mcppls::cli::run asked as the first request -- a cold start's first jump, answered by the native engine from src/cli/commands.cppm while the build description is read. Then self-mcppls's own checks but the stress and the module graph (its S1 given 180 s: on the mcxx engine, readiness is every module built). Its first-navigation is what the mcxx workflow's cold-start job times.",
+  "prepare": [
+    [
+      "git",
+      "init",
+      "-q"
+    ],
+    [
+      "git",
+      "fetch",
+      "-q",
+      "--depth",
+      "1",
+      "https://github.com/Sunrisepeak/mcpp-language-server.git",
+      "5e4bdec26d248678d421d4256c561a3b765060ac"
+    ],
+    [
+      "git",
+      "checkout",
+      "-q",
+      "FETCH_HEAD"
+    ],
+    [
+      "mcpp",
+      "emit",
+      "build-database"
+    ]
+  ],
+  "checks": [
+    {
+      "id": "C0-run-declaration",
+      "kind": "declaration",
+      "file": "src/main.cpp",
+      "at": [
+        5,
+        26
+      ],
+      "expect": "src/cli/commands.cppm"
+    },
+    {
+      "id": "S1",
+      "kind": "status",
+      "source": "mcpp",
+      "timeout": 180
+    },
+    {
+      "id": "C1-main-to-cli-definition",
+      "kind": "definition",
+      "file": "src/main.cpp",
+      "at": [
+        5,
+        26
+      ],
+      "expect": "src/cli/commands.cpp"
+    },
+    {
+      "id": "C2-main-hover",
+      "kind": "hover-contains",
+      "file": "src/main.cpp",
+      "at": [
+        5,
+        26
+      ],
+      "expect": "run"
+    }
+  ]
+}

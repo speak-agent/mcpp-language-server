@@ -44,6 +44,14 @@
       "sha256": "ab1f0e3ec52448c33e8782eaf0422504b87c7b016b22514653ee0d8fcee479ff",
       "license": "Apache-2.0 WITH LLVM-exception"
     },
+    "llvm-clang-dev": {
+      "url": "https://github.com/speak-agent/llvm-clang-dev/archive/refs/tags/23.1.0.6.tar.gz",
+      "file": "llvm-clang-dev-23.1.0.6.tar.gz",
+      "size": 64134890,
+      "sha256": "fd82f8b5765972462190938333015628a2b06451efb2235971d943da906362e8",
+      "license": "Apache-2.0 WITH LLVM-exception",
+      "comment": "The llvm.clang-dev revision libmc++ builds against; only llvm-generated/clang-lib/Headers is kept: the builtin headers Clang's build generates (arm_neon.h, the other ARM, AArch64 and RISC-V intrinsics), which llvm-project-src's clang/lib/Headers does not hold, added to the mcxx engine's resource directory of an arm64 payload (7 MB; an x64 payload does without, within its size)."
+    },
     "llvm-mingw": {
       "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260826/llvm-mingw-20260826-ucrt-ubuntu-22.04-x86_64.tar.xz",
       "file": "llvm-mingw-20260826-ucrt-ubuntu-22.04-x86_64.tar.xz",

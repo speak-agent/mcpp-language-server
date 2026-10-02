@@ -66,6 +66,10 @@ struct Options {
     // that asks whether the client understands `cxxModules/status`, i.e. only to the one client
     // that already had progress (cold-start plan 4.1).
     bool plainClient { false };
+    // `--core-engine`: the core engine the server under test runs (its default). A fixture's
+    // "engine-name"/"engines-include" of "clangd" predates a choice of core engine and means this
+    // one; "only-engine" names the engines a check (or a whole fixture) holds for.
+    std::string coreEngine { "mcxx" };
     // `--client`: the capabilities a real editor actually sends. `none` (no flag at all) keeps this
     // runner's own long-standing default, the full experimental.cxxModules block with no
     // initializationOptions, so every fixture that predates this option keeps behaving exactly as
@@ -257,6 +261,16 @@ std::map<std::string, std::string> snapshot(const std::string& root) {
     return files;
 }
 
+// libmc++ (the mcxx engine) keeps a module's interface as <cache>/mcxx/modules/<module>-<16 hex digits>.pcm,
+// the digits a key of what it was built from; a rebuild with other inputs is another file.
+bool is_mcxx_module_file(const std::string& path, std::string_view published) {
+    const std::string name { base::file_name(path) };
+    const std::string_view stem { published.substr(0, published.size() - 4) };
+    if (base::file_name(base::parent_path(path)) != "modules" || base::file_name(base::parent_path(base::parent_path(path))) != "mcxx") return false;
+    if (name.size() != stem.size() + 1 + 16 + 4 || !name.starts_with(stem) || name[stem.size()] != '-' || !name.ends_with(".pcm")) return false;
+    return std::ranges::all_of(name.substr(stem.size() + 1, 16), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)) != 0; });
+}
+
 // The engine's published module files for a module under a cache directory, with their stamps. clangd
 // publishes <module>.pcm (a partition as <module>-<partition>.pcm) under a directory per source and
 // command; the copies it hands to readers carry a timestamp in their names and are not included.
@@ -273,7 +287,7 @@ std::map<std::string, std::string> module_files(const std::string& cacheDirector
         for (const auto& entry : fs::list_directory(directory)) {
             if (fs::is_directory(entry)) {
                 pending.push_back(entry);
-            } else if (base::file_name(entry) == published) {
+            } else if (base::file_name(entry) == published || is_mcxx_module_file(entry, published)) {
                 const auto stamp = fs::stamp(entry);
                 files[entry] = stamp ? std::format("{}:{}", stamp->size, stamp->modified) : std::string {};
             }
@@ -365,7 +379,7 @@ public:
     // empty answer — both of which `request` below collapses to `Json(nullptr)`, which is fine for
     // every check that only asks "did it answer", but not for one that counts errors on their own.
     struct RequestOutcome {
-        Json result { nullptr };
+        Json result = nullptr;   // `{ nullptr }` is an array holding null
         bool timedOut { false };
         bool isError { false };
     };
@@ -525,8 +539,24 @@ private:
     std::unique_ptr<lsp::Connection> connection_;
     std::shared_ptr<mcppls::platform::Channel<Json>> inbox_ { std::make_shared<mcppls::platform::Channel<Json>>() };
     std::int64_t nextId_ { 1 };
+    // Its last lines on standard error, for when it ends: a crash's own report is there.
+    struct Tail {
+        std::mutex mutex;
+        std::deque<std::string> lines;
+    };
+    std::shared_ptr<Tail> tail_ { std::make_shared<Tail>() };
 
 public:
+    // Empty while it runs; how it ended, and its last words, once it has.
+    std::string ended() const {
+        if (!inbox_->closed() || inbox_->size() != 0 || !connection_) return {};
+        const auto code = connection_->exit_code();
+        std::string out { code ? std::format("mcppls mcp exited with status {}", *code) : std::string { "mcppls mcp closed its output" } };
+        std::lock_guard lock { tail_->mutex };
+        for (const auto& line : tail_->lines) out += "\n      | " + line;
+        return out;
+    }
+
     base::Result<void> start(const Options& options, const std::vector<std::string>& serverArguments, const std::string& workspace,
                              const std::string& cacheDirectory, bool daemon) {
         mcppls::platform::SpawnOptions spawn;
@@ -544,10 +574,14 @@ public:
         spawn.environment = std::move(environment);
         const bool verbose { options.verbose };
         auto inbox = inbox_;
+        auto tail = tail_;
         auto connection = lsp::Connection::start(
             std::move(spawn), [inbox](Json message) { inbox->push(std::move(message)); }, [inbox] { inbox->close(); },
-            [verbose](std::string_view line) {
+            [verbose, tail](std::string_view line) {
                 if (verbose) say("  mcp: {}", line);
+                std::lock_guard lock { tail->mutex };
+                tail->lines.emplace_back(line);
+                if (tail->lines.size() > 20) tail->lines.pop_front();
             },
             lsp::Framing::lines);
         if (!connection) return std::unexpected { connection.error() };
@@ -1073,7 +1107,9 @@ public:
     std::pair<bool, std::string> run_(const Json& check) {
         const std::string kind { check.value("kind", std::string {}) };
         const std::string file { check.value("file", std::string { "src/main.cpp" }) };
-        // A check may bring its own unsaved buffer.
+        // A check may bring its own unsaved buffer; what was published before it is not about it.
+        const int publishedBefore { client_.diagnosticsCount[uri(file)] };
+        const bool ownText { check.contains("text") };
         if (auto text = check.find("text"); text != check.end()) open(file, text->get<std::string>());
         if (kind == "status") {
             // usable plan W9.1: "folder" selects one root's own status in a multi-root fixture
@@ -1128,13 +1164,17 @@ public:
                     matched = matched && snapshot.value("profile", Json::object()).value("compiler", std::string {}).starts_with(compiler->get<std::string>());
                 }
                 // overall design 5.2 and 5.6: the core engine, and every engine serving the root.
+                const auto core_name = [&](const Json& named) {
+                    const std::string name { named.get<std::string>() };
+                    return name == "clangd" ? options_.coreEngine : name;
+                };
                 if (auto engineName = check.find("engine-name"); engineName != check.end()) {
-                    matched = matched && snapshot.value("engine", Json::object()).value("name", std::string {}) == engineName->get<std::string>();
+                    matched = matched && snapshot.value("engine", Json::object()).value("name", std::string {}) == core_name(*engineName);
                 }
                 if (auto engines = check.find("engines-include"); engines != check.end()) {
                     for (const auto& wanted : *engines) {
                         matched = matched && std::ranges::any_of(snapshot.value("engines", Json::array()), [&](const Json& engine) {
-                            return engine.value("name", std::string {}) == wanted.get<std::string>();
+                            return engine.value("name", std::string {}) == core_name(wanted);
                         });
                     }
                 }
@@ -1192,7 +1232,10 @@ public:
             do {
                 const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - Clock::now());
                 const auto response = mcp->request(method, params, std::max(std::chrono::seconds { 1 }, remaining), [this] { client_.drain(std::chrono::milliseconds { 0 }); });
-                if (!response) break;
+                if (!response) {
+                    if (const std::string end { mcp->ended() }; !end.empty()) why = end;
+                    break;
+                }
                 Json value = response->value("result", Json {});
                 bool isError { false };
                 if (method == "tools/call") {
@@ -1431,7 +1474,8 @@ public:
             open(file);
             const std::string documentUri { uri(file) };
             const bool published { client_.wait_for([&] {
-                return client_.diagnosticsCount[documentUri] > 0 && state_of(client_.status) != "preparing" && state_of(client_.status) != "loading";
+                return client_.diagnosticsCount[documentUri] > (ownText ? publishedBefore : 0) && state_of(client_.status) != "preparing"
+                       && state_of(client_.status) != "loading";
             }, timeout_) };
             client_.drain(std::chrono::milliseconds { 1500 });
             Json errors = Json::array();
@@ -1502,6 +1546,24 @@ public:
                 });
             std::string text { hover_text(result) };
             return { ok, text.substr(0, std::min<std::size_t>(text.size(), 160)) };
+        }
+        if (kind == "signature-help-contains") {
+            open(file);
+            // `at` inside a call's parentheses; `expect`: a text one of the signatures' labels contains.
+            const std::string expected { check.value("expect", std::string {}) };
+            const auto labels = [](const Json& value) {
+                std::vector<std::string> out;
+                if (value.is_object() && value.contains("signatures") && value.at("signatures").is_array())
+                    for (const auto& s : value.at("signatures")) out.push_back(s.value("label", std::string {}));
+                return out;
+            };
+            auto [ok, result] = retry("textDocument/signatureHelp",
+                [&] { return Json { { "textDocument", Json { { "uri", uri(file) } } }, { "position", position(check.at("at")) } }; },
+                [&](const Json& value) {
+                    return std::ranges::any_of(labels(value), [&](const std::string& label) { return label.find(expected) != std::string::npos; });
+                });
+            const std::string shown { base::join(labels(result), " | ") };
+            return { ok, shown.substr(0, std::min<std::size_t>(shown.size(), 160)) };
         }
         if (kind == "completion-contains") {
             open(file);
@@ -1928,6 +1990,12 @@ int run(Options options) {
         fs::remove_all(base::join_path(workspace, "scenario.json"));
     }
     say("fixture {} in {}{}", name, workspace, alreadyPrepared ? " (prepared before)" : "");
+    if (const auto onlyEngine = scenario.find("only-engine"); onlyEngine != scenario.end() && onlyEngine->is_array()) {
+        if (std::ranges::none_of(*onlyEngine, [&](const Json& e) { return e.is_string() && e.get<std::string>() == options.coreEngine; })) {
+            say("SKIP fixture {} (only with {})", name, lsp::dump(*onlyEngine));
+            return 0;
+        }
+    }
 
     const std::string self { absolute(mcppls::platform::env::arguments().front()) };
     // real-project plan RP2.1: an isolated HOME so producer negotiation
@@ -2077,6 +2145,12 @@ int run(Options options) {
         }
         // `only-on`: the operating systems a check holds on ("linux", "macos", "windows"); a defect that shows
         // differently elsewhere (a crash instead of a spin) is checked by its own entry there.
+        if (const auto onlyEngine = check.find("only-engine"); onlyEngine != check.end() && onlyEngine->is_array()) {
+            if (std::ranges::none_of(*onlyEngine, [&](const Json& e) { return e.is_string() && e.get<std::string>() == options.coreEngine; })) {
+                say("SKIP {} {} (only with {})", id, check.value("kind", std::string {}), lsp::dump(*onlyEngine));
+                continue;
+            }
+        }
         if (const auto onlyOn = check.find("only-on"); onlyOn != check.end() && onlyOn->is_array()) {
             const std::string_view here { mcppls::os::FAMILY == mcppls::os::Family::windows ? "windows"
                                           : mcppls::os::FAMILY == mcppls::os::Family::macos ? "macos" : "linux" };
@@ -2250,8 +2324,12 @@ int prepare_payload_corrupt(const std::string& source) {
         return 1;
     }
     if (!manifest.contains("files")) manifest["files"] = Json::object();
-    const std::string clangd { base::join_path(target, "clangd/bin/clangd") };
-    for (const auto& [relative, path] : { std::pair { std::string { "clangd/bin/clangd" }, clangd },
+    // The engine's own file is what is corrupted: clangd's executable in a payload that has one,
+    // else the mcxx engine's builtin headers.
+    const std::string victimRelative { fs::is_regular_file(base::join_path(target, "clangd/bin/clangd")) ? "clangd/bin/clangd"
+                                                                                                         : "mcxx/resource/include/stddef.h" };
+    const std::string victim { base::join_path(target, victimRelative) };
+    for (const auto& [relative, path] : { std::pair { victimRelative, victim },
                                           std::pair { std::string { "kit/kit.json" }, base::join_path(target, "kit/kit.json") } }) {
         if (manifest["files"].contains(relative) || !fs::is_regular_file(path)) continue;
         auto content = fs::read_file(path);
@@ -2263,12 +2341,12 @@ int prepare_payload_corrupt(const std::string& source) {
         return 1;
     }
     // Corrupt it now, after the manifest above was computed from the still-intact file.
-    auto intact = fs::read_file(clangd);
+    auto intact = fs::read_file(victim);
     if (!intact) {
-        say("payload-corrupt: {} has no clangd/bin/clangd", source);
+        say("payload-corrupt: {} has no {}", source, victimRelative);
         return 1;
     }
-    if (auto written = fs::write_file(clangd, std::string_view { *intact }.substr(0, std::min<std::size_t>(1024, intact->size()))); !written) {
+    if (auto written = fs::write_file(victim, std::string_view { *intact }.substr(0, std::min<std::size_t>(intact->size() / 2, 1024))); !written) {
         say("payload-corrupt: {}", written.error().message);
         return 1;
     }
@@ -2717,6 +2795,7 @@ int main(int argc, char* argv[]) {
     (void)runCommand.option("plain-client").help("Alias for --client plain");
     (void)runCommand.option("client").takes_value().help("The capabilities a real editor sends: vscode, neovim, zed or plain (default: this runner's own, the full experimental.cxxModules block)");
     (void)runCommand.option("stress-seed").takes_value().help("Overrides every stress check's own \"seed\" (mcppls-devtools stress --seed)");
+    (void)runCommand.option("core-engine").takes_value().help("The core engine the server runs by default: mcxx (default) or clangd");
     (void)runCommand.option("keep-bundles").takes_value().help("Directory a copy of every diagnostic bundle a bundle check exported is left in");
     (void)runCommand.action([&](const cmdline::ParsedArgs& args) {
         Options options;
@@ -2735,6 +2814,7 @@ int main(int argc, char* argv[]) {
         options.expectWarm = args.is_flag_set("expect-warm");
         options.noDynamicWatch = args.is_flag_set("no-dynamic-watch");
         options.plainClient = args.is_flag_set("plain-client");
+        if (auto core = args.value("core-engine")) options.coreEngine = *core;
         options.keepBundles = args.value("keep-bundles") ? absolute(*args.value("keep-bundles")) : std::string {};
         if (auto clientName = args.value("client")) {
             if (*clientName == "vscode") options.client = Options::ClientProfile::vscode;

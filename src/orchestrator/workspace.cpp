@@ -92,6 +92,10 @@ struct WatchPatterns {
     std::mutex mutex;
     std::vector<std::string> entries;   // glob patterns relative to the root, or absolute paths
     int generation { 0 };               // advanced whenever `entries` is replaced
+    // The files `entries` covered when they were set, as they were then (polling only): what was
+    // there all along starts from that, and a file created or changed after it is reported, however
+    // soon after the model named it the next poll comes.
+    std::map<std::string, platform::fs::FileStamp> named;
 };
 
 // Whether `path` is one of `entries`: an absolute entry names the file, a relative one is a glob under `root`.
@@ -317,6 +321,11 @@ struct Workspace::Impl final : engine::Host {
     // alike -- while the build tool goes on, and its model replaces the provisional one in a single switch that is
     // never counted against clangd's restart budget. CORE_WAIT_LIMIT is what clangd waits beyond that: nothing.
     static constexpr std::chrono::milliseconds FIRST_MODEL_WAIT { 2500 };
+    // How long a request the native engine answers from its index waits for the first model to fill
+    // it (a cold start's first jump, A2.3.2): the scanned sources' model comes after FIRST_MODEL_WAIT.
+    static constexpr std::chrono::seconds INDEX_WAIT { 8 };
+    std::vector<std::uint64_t> heldForIndex;
+    std::optional<Clock::time_point> heldUntil;
     static constexpr std::chrono::milliseconds CORE_WAIT_LIMIT { 0 };
     std::optional<Clock::time_point> coreWaitUntil;
     bool coreWaitOver { false };
@@ -531,6 +540,7 @@ struct Workspace::Impl final : engine::Host {
         consider(replanAt);
         if (!coreWaitOver) consider(coreWaitUntil);
         consider(loadGiveUpAt);
+        consider(heldUntil);
         consider(downloadRetryAt);
         consider(lastResortAt);
         consider(producerSoftAt);
@@ -557,21 +567,25 @@ struct Workspace::Impl final : engine::Host {
             while (true) {
                 std::this_thread::sleep_for(std::chrono::seconds { 2 });
                 std::vector<std::string> entries;
+                std::map<std::string, platform::fs::FileStamp> named;
                 int generation { 0 };
                 {
                     const std::lock_guard lock { patterns->mutex };
                     entries = patterns->entries;
                     generation = patterns->generation;
+                    if (generation != knownGeneration) named = patterns->named;
                 }
                 std::map<std::string, platform::fs::FileStamp> current { watched_files_snapshot_of(rootPath, entries) };
                 // A model that names new inputs brings files into the watch that were there all along:
-                // they start from what they are now rather than being reported as created.
+                // they start from what they were when it named them rather than being reported as
+                // created. One created or changed since (before this poll) is reported.
                 const bool entriesChanged { generation != knownGeneration };
                 Json changes = Json::array();
                 for (const auto& [file, fileStamp] : current) {
                     const auto previous = known.find(file);
                     if (previous == known.end()) {
-                        if (entriesChanged && !watch_covers(knownEntries, rootPath, file)) continue;
+                        const auto there = named.find(file);
+                        if (entriesChanged && !watch_covers(knownEntries, rootPath, file) && there != named.end() && there->second == fileStamp) continue;
                         changes.push_back(Json { { "uri", base::path_to_uri(file) }, { "type", 1 } });
                     } else if (previous->second != fileStamp) {
                         changes.push_back(Json { { "uri", base::path_to_uri(file) }, { "type", 2 } });
@@ -629,6 +643,34 @@ struct Workspace::Impl final : engine::Host {
             }
         }
 
+        // Before any model has filled the native index, a jump or a hover waits for the first one (the
+        // scanned sources' at the latest), which the native engine answers from at once, rather than
+        // going to the core engine, which has modules to build first. A completion does not wait: its
+        // keywords are due at once (F15).
+        if (!model && holds_for_index(job.method)) {
+            heldForIndex.push_back(jobId);
+            if (!heldUntil) heldUntil = Clock::now() + INDEX_WAIT;
+            return;
+        }
+        dispatch(jobId);
+    }
+
+    static bool holds_for_index(std::string_view method) {
+        return method == lsp::method::TEXT_DOCUMENT_DEFINITION || method == lsp::method::TEXT_DOCUMENT_DECLARATION ||
+               method == lsp::method::TEXT_DOCUMENT_HOVER;
+    }
+
+    // The requests held for the first model, routed now (it has come, or INDEX_WAIT is over).
+    void release_held() {
+        heldUntil.reset();
+        const auto held { std::move(heldForIndex) };
+        heldForIndex.clear();
+        for (const auto jobId : held)
+            if (jobs.contains(jobId)) dispatch(jobId);
+    }
+
+    void dispatch(std::uint64_t jobId) {
+        Job& job = jobs.at(jobId);
         std::vector<engine::Engine*> candidates;
         const bool coreWaits { core_waits_for_producer() };
         for (const auto& engine : engines) {
@@ -711,7 +753,7 @@ struct Workspace::Impl final : engine::Host {
     // F15: the keywords go out without the core engine, which has not answered in KEYWORD_PATIENCE.
     // The job is finished first, so the engines' answers to the cancellation find nothing to finish.
     void answer_keywords_without_engine(std::uint64_t jobId) {
-        const Json clientId { jobs.at(jobId).clientId };
+        const Json clientId = jobs.at(jobId).clientId;   // `{ }` would wrap the id in an array, and no engine would find it
         ++keywordsWithoutEngine;
         jobs.at(jobId).answeredBy = "mcppls";
         finish_job(jobId, Json(nullptr));
@@ -1181,9 +1223,12 @@ struct Workspace::Impl final : engine::Host {
         const bool unchanged { model && description == modelDescription };
         model = std::move(loadedModel);
         if (watchChanged) {
+            std::map<std::string, platform::fs::FileStamp> named;
+            if (!dynamicWatch) named = watched_files_snapshot_of(root, model->watch);
             {
                 const std::lock_guard lock { watchPatterns->mutex };
                 watchPatterns->entries = model->watch;
+                watchPatterns->named = std::move(named);
                 ++watchPatterns->generation;
             }
             register_model_watch();
@@ -1249,6 +1294,7 @@ struct Workspace::Impl final : engine::Host {
             reloadAfterLoad = false;
             start_model_load();
         }
+        release_held();
     }
 
     void replan() {
@@ -1738,6 +1784,7 @@ struct Workspace::Impl final : engine::Host {
             loadGiveUpAt.reset();
             use_what_there_is();
         }
+        if (heldUntil && *heldUntil <= now) release_held();
         if (lastResortAt && *lastResortAt <= now) {
             lastResortAt.reset();
             if (!firstPlanWritten) {

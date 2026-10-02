@@ -8,6 +8,8 @@ import mcppls.base.uri;
 import mcppls.spec.database;
 import mcppls.spec.metadata;
 import mcppls.project.scan;
+import mcxx.frontend;
+import mcxx.lsp;
 
 namespace mcppls::index {
 
@@ -83,9 +85,34 @@ void ModuleIndex::update(std::string_view path, std::string_view text) {
     auto& entry = files_[base::path_key(path)];
     if (provided_identity(entry.second) != provided_identity(scan)) structure_changed_();
     entry = { std::string { path }, std::move(scan) };
+    // Its parse and its outline, from MC++'s own front end, are made when first needed.
+    declarations_.update(path, text);
+    outlines_.erase(base::path_key(path));
+}
+
+const ModuleIndex::Outline* ModuleIndex::outline_(std::string_view path) const {
+    const std::string key { base::path_key(path) };
+    if (const auto it = outlines_.find(key); it != outlines_.end()) return &it->second;
+    const auto* syntax = declarations_.syntax(path);
+    if (syntax == nullptr) return nullptr;
+    auto& outline = outlines_[key];
+    outline.document = mcxx::lsp::document_symbols(mcxx::frontend::symbols(*syntax), declarations_.text(path));
+    const std::string uri { base::path_to_uri(std::string { path }) };
+    std::function<void(const Json&, const std::string&)> flatten = [&](const Json& symbols, const std::string& container) {
+        for (const auto& s : symbols) {
+            outline.flat.push_back(Json { { "name", s["name"] }, { "kind", s["kind"] },
+                                          { "location", Json { { "uri", uri }, { "range", s["selectionRange"] } } }, { "containerName", container } });
+            if (s.contains("children"))
+                flatten(s["children"], container.empty() ? s["name"].get<std::string>() : container + "::" + s["name"].get<std::string>());
+        }
+    };
+    flatten(outline.document, {});
+    return &outline;
 }
 
 void ModuleIndex::remove(std::string_view path) {
+    outlines_.erase(base::path_key(path));
+    declarations_.remove(path);
     if (const auto it = files_.find(base::path_key(path)); it != files_.end()) {
         if (it->second.second.declaration) structure_changed_();
         files_.erase(it);
@@ -94,6 +121,8 @@ void ModuleIndex::remove(std::string_view path) {
 
 void ModuleIndex::clear() {
     files_.clear();
+    outlines_.clear();
+    declarations_.clear();
     structure_changed_();
 }
 
@@ -184,9 +213,22 @@ std::optional<ModuleHit> ModuleIndex::module_at(std::string_view path, base::Pos
     return std::nullopt;
 }
 
+DeclarationIndex::Providers ModuleIndex::interface_files() const {
+    return [this](std::string_view name) {
+        std::vector<std::string> paths;
+        for (const auto& unit : providers(name)) paths.push_back(unit.path);
+        return paths;
+    };
+}
+
+Json ModuleIndex::declaration(std::string_view path, base::Position position) const {
+    if (module_at(path, position)) return definition(path, position);
+    return declarations_.find(path, position_json(position), false, interface_files());
+}
+
 Json ModuleIndex::definition(std::string_view path, base::Position position) const {
     const auto hit = module_at(path, position);
-    if (!hit) return nullptr;
+    if (!hit) return declarations_.find(path, position_json(position), true, interface_files());
     Json locations = Json::array();
     std::string target { hit->name };
     // An implementation unit's declaration names its primary interface.
@@ -206,7 +248,8 @@ Json ModuleIndex::definition(std::string_view path, base::Position position) con
 
 Json ModuleIndex::hover(std::string_view path, base::Position position) const {
     const auto hit = module_at(path, position);
-    if (!hit) return nullptr;
+    // A name the file writes: its declaration, when the front end is sure of what it names (E-LS-4).
+    if (!hit) return declarations_.hover(path, position_json(position), interface_files());
     std::string value { std::format("```cpp\nmodule {}\n```\n", hit->name) };
     const auto units = providers(hit->name);
     if (!units.empty()) {
@@ -235,14 +278,16 @@ Json ModuleIndex::completion(std::string_view path, std::string_view text, base:
         return text;
     };
     std::string_view rest { trim_left(line) };
+    // Not an import: what may follow a member access or a qualification, the front end's (E-LS-4).
+    const auto members = [&] { return declarations_.completion(path, position_json(position), interface_files()); };
     if (rest.starts_with("export")) {
         rest.remove_prefix(6);
-        if (rest.empty() || (rest.front() != ' ' && rest.front() != '\t')) return nullptr;
+        if (rest.empty() || (rest.front() != ' ' && rest.front() != '\t')) return members();
         rest = trim_left(rest);
     }
-    if (!rest.starts_with("import")) return nullptr;
+    if (!rest.starts_with("import")) return members();
     rest.remove_prefix(6);
-    if (rest.empty() || (rest.front() != ' ' && rest.front() != '\t')) return nullptr;
+    if (rest.empty() || (rest.front() != ' ' && rest.front() != '\t')) return members();
     const std::string_view partial { trim_left(rest) };
     if (!std::ranges::all_of(partial, [](char c) { return base::is_identifier_char(c) || c == '.' || c == ':'; })) return nullptr;
     const std::size_t partialStart { *offset - partial.size() };
@@ -311,11 +356,15 @@ Json ModuleIndex::diagnostics(std::string_view path) const {
 Json ModuleIndex::document_symbols(std::string_view path) const {
     Json result = Json::array();
     const auto* scan = scan_of(path);
-    if (scan == nullptr || !scan->declaration) return result;
-    const auto& declaration = *scan->declaration;
-    result.push_back(Json { { "name", declared_name(declaration) }, { "detail", std::string { role_label(project::role_of(*scan)) } },
-                            { "kind", SYMBOL_KIND_MODULE }, { "range", to_json(declaration.nameRange) },
-                            { "selectionRange", to_json(declaration.nameRange) } });
+    if (scan != nullptr && scan->declaration) {
+        const auto& declaration = *scan->declaration;
+        result.push_back(Json { { "name", declared_name(declaration) }, { "detail", std::string { role_label(project::role_of(*scan)) } },
+                                { "kind", SYMBOL_KIND_MODULE }, { "range", to_json(declaration.nameRange) },
+                                { "selectionRange", to_json(declaration.nameRange) } });
+    }
+    // The file's own declarations (M1.8: MC++'s own front end, not a parse).
+    if (const auto* outline = outline_(path))
+        for (const auto& s : outline->document) result.push_back(s);
     return result;
 }
 
@@ -329,6 +378,21 @@ Json ModuleIndex::workspace_symbols(std::string_view query) const {
         if (!needle.empty() && base::to_lower_ascii(name).find(needle) == std::string::npos) continue;
         result.push_back(Json { { "name", name }, { "kind", SYMBOL_KIND_MODULE },
                                 { "location", make_location(entry.first, scan.declaration->nameRange) }, { "containerName", "" } });
+    }
+    // Every file's declarations (M1.8): the query found in a name; a qualified query (`hello::greet`)
+    // is a scope and a name, the scope the symbol's own or an enclosing one's end.
+    const auto qualifier = needle.rfind("::");
+    const std::string scope { qualifier == std::string::npos ? std::string {} : needle.substr(0, qualifier) };
+    const std::string wanted { qualifier == std::string::npos ? needle : needle.substr(qualifier + 2) };
+    for (const auto& [key, file] : files_) {
+        const auto* outline = outline_(file.first);
+        if (outline == nullptr) continue;
+        for (const auto& s : outline->flat) {
+            const std::string name { base::to_lower_ascii(s["name"].get<std::string>()) };
+            const std::string container { base::to_lower_ascii(s.value("containerName", std::string {})) };
+            const bool in_scope { scope.empty() || container == scope || container.ends_with("::" + scope) };
+            if (in_scope && name.find(wanted) != std::string::npos) result.push_back(s);
+        }
     }
     return result;
 }

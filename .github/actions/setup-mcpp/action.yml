@@ -28,12 +28,19 @@ runs:
       run: |
         irm https://d2learn.org/xlings-install.ps1.txt | iex
         "$env:USERPROFILE\.xlings\subos\current\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+    # The runner's image (ImageOS: macos14, macos15, win22, ubuntu24) is part of the key: a store
+    # installed on macos-14 and restored on macos-15 (darwin's cold starts) failed to precompile
+    # openkal-musl's module ("unknown type name 'ldiv_t'"); a store installed there afresh did not.
+    - name: The runner's image
+      id: image
+      shell: bash
+      run: echo "name=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
     - name: Cache the mcpp package store
       uses: actions/cache@v6
       with:
         path: ~/.mcpp/registry/data/xpkgs
-        key: mcpp-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
-        restore-keys: mcpp-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-
+        key: mcpp-xpkgs-${{ steps.image.outputs.name }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+        restore-keys: mcpp-xpkgs-${{ steps.image.outputs.name }}-${{ env.MCPP_VERSION }}-
     - name: Install mcpp and LLVM
       shell: bash
       run: bash .github/scripts/install-mcpp.sh

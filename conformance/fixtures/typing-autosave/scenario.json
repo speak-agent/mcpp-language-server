@@ -67,7 +67,7 @@
       ]
     },
     {
-      "id": "T3-disk-seen",
+      "id": "T3-disk-seen", "only-engine": ["clangd"],
       "kind": "report",
       "timeout": 20,
       "expect": [
@@ -184,7 +184,7 @@
       "timeout": 30
     },
     {
-      "id": "T10-nothing-left-aside",
+      "id": "T10-nothing-left-aside", "only-engine": ["clangd"],
       "kind": "report",
       "timeout": 30,
       "expect": [
@@ -203,7 +203,7 @@
       ]
     },
     {
-      "id": "T11-no-restart-but-for-a-spin",
+      "id": "T11-no-restart-but-for-a-spin", "only-engine": ["clangd"],
       "kind": "report",
       "timeout": 10,
       "expect": [
@@ -226,7 +226,7 @@
       "line": 1
     },
     {
-      "id": "D2-unsaved-import-is-information",
+      "id": "D2-unsaved-import-is-information", "only-engine": ["clangd"],
       "kind": "diagnostic-code",
       "file": "src/main.cpp",
       "text": "import std;\nimport hello.greet;\nimport hello.extra;\n\nint main(int argc, char* argv[]) {\n    std::println(\"{} {}\", hello::greet(\"mcpp\"), hello::extra());\n    return 0;\n}\n",
@@ -235,6 +235,7 @@
       "absent": [
         "module_not_found"
       ]
-    }
+    },
+    {"id": "D2-unsaved-import-resolves", "only-engine": ["mcxx"], "kind": "diagnostics-empty", "file": "src/main.cpp", "text": "import std;\nimport hello.greet;\nimport hello.extra;\n\nint main(int argc, char* argv[]) {\n    std::println(\"{} {}\", hello::greet(\"mcpp\"), hello::extra());\n    return 0;\n}\n"}
   ]
 }

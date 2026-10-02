@@ -6,6 +6,7 @@
     ["git", "add", "-A"],
     ["git", "-c", "user.name=mcppls", "-c", "user.email=mcppls@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "base"]
   ],
+  "server-arguments": ["--log-level", "info"],
   "checks": [
     { "id": "S1", "kind": "status", "source": "mcpp", "state": "ready" },
     { "id": "V1-snippet-pass", "kind": "mcp", "tool": "cxx_verify",

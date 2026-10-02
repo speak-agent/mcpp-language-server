@@ -1,5 +1,6 @@
 {
   "name": "clangd-crash-context",
+  "only-engine": ["clangd"],
   "description": "Fix plan 2026-09-26 F3 (issue #23): clangd names the file it crashed on. Its `prepare` step puts a stand-in clangd in the workspace that runs the payload's clangd and, 25 seconds in, prints a crash context naming src/crasher.cpp -- a file nobody opened -- the way clangd 23.1 did on Windows, and kills it; later starts are the real clangd. Meanwhile the editor types in src/main.cpp. 0.0.4 set aside what it had been given or asked about in the last ten seconds, main.cpp, and not the file clangd named; now only src/crasher.cpp is set aside, the exit is reported with its crash context, and main.cpp keeps clangd once it is back.",
   "prepare": [
     [

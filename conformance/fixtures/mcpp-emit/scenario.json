@@ -118,6 +118,17 @@
       ]
     },
     {
+      "id": "C9-signature",
+      "kind": "signature-help-contains",
+      "file": "src/main.cpp",
+      "at": [
+        4,
+        36
+      ],
+      "expect": "greet",
+      "$comment": "Signature help inside a call's parentheses: the function's signature, from the engine (AS.1.2)."
+    },
+    {
       "id": "C10-test",
       "kind": "definition",
       "file": "tests/greet_test.cpp",

@@ -9,6 +9,7 @@ import mcppls.base.text;
 import mcppls.spec.database;
 import mcppls.spec.metadata;
 import mcppls.project.scan;
+import mcppls.engine.native.declarations;
 
 export namespace mcppls::index {
 
@@ -34,6 +35,18 @@ struct ModuleHit {
 class ModuleIndex {
 private:
     std::map<std::string, std::pair<std::string, project::ScanResult>, std::less<>> files_;   // path key -> (path, scan)
+    // Each file's outline from MC++'s own front end (mcxx.frontend, M1.8): DocumentSymbol[], and the
+    // same flattened as SymbolInformation[] for workspace/symbol.
+    struct Outline {
+        nlohmann::json document;
+        std::vector<nlohmann::json> flat;
+    };
+    // Made when first asked for (a documentSymbol, a workspace/symbol): reading a project's files is
+    // then no more than scanning them, as a cold start's first jump needs.
+    mutable std::map<std::string, Outline, std::less<>> outlines_;
+    const Outline* outline_(std::string_view path) const;
+    // Each file's parse, and what a name in it names (M2.3): answered before the engine can.
+    DeclarationIndex declarations_;
     std::vector<ExternalModule> external_;
     std::string profileLabel_;
     // What import completion offers (fix plan 2026-09-26 F9, D4): every module name with what
@@ -47,6 +60,8 @@ private:
     std::uint64_t structure_ { 0 };
     const std::vector<Candidate>& candidates_now_() const;
     void structure_changed_();
+    // The files of a module's interface units, for the declarations a file imports.
+    DeclarationIndex::Providers interface_files() const;
 
 public:
     void update(std::string_view path, std::string_view text);
@@ -65,8 +80,12 @@ public:
     std::uint64_t structure_generation() const { return structure_; }
 
     std::optional<ModuleHit> module_at(std::string_view path, base::Position position) const;
-    // Each returns null when the position is not one this index answers for.
+    // Each returns null when the position is not one this index answers for. definition(),
+    // declaration() and hover(): a module name, or (M2.3) a name MC++'s own front end resolves for
+    // certain from the file and the sources of the interfaces it imports; completion(): an import's
+    // module name, or (M2.3) the members after a member access or a qualification the front end knows.
     nlohmann::json definition(std::string_view path, base::Position position) const;
+    nlohmann::json declaration(std::string_view path, base::Position position) const;
     nlohmann::json hover(std::string_view path, base::Position position) const;
     nlohmann::json completion(std::string_view path, std::string_view text, base::Position position) const;
 

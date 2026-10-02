@@ -1,0 +1,1076 @@
+name: mcxx
+
+# The mcxx engine (libmc++ in process, no clangd): build, unit tests, a clangd-free payload, and
+# the linux-x64 fixtures in parallel parts. The checkout is the development layout of MC++:
+# Sunrisepeak/mcpp-safe (libmc++) at the root and this fork under forks/; llvm.clang-dev comes from
+# libmc++'s own index (mcpp-safe/index).
+
+on:
+  push:
+    branches: [mcxx-engine]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      mcpp-safe-ref:
+        description: The libmc++ (Sunrisepeak/mcpp-safe) ref to build against
+        default: main
+
+concurrency:
+  group: mcxx-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XLINGS_NON_INTERACTIVE: '1'
+  XLINGS_VERSION: v2026.8.17.2
+  MCPP_VERSION: 2026.9.28.2
+  LLVM_VERSION: 22.1.8
+  FORK: forks/mcpp-language-server
+
+jobs:
+  build:
+    name: build, unit tests and payload (linux-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: This fork
+        uses: actions/checkout@v4
+        with:
+          path: forks/mcpp-language-server
+      - name: Source rules (libmc++'s lint, over this fork)
+        run: python3 tools/checks/lint.py "$FORK/src" "$FORK/modules" "$FORK/tools"
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mcxx-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+          restore-keys: mcxx-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: bash "$FORK/.github/scripts/install-mcpp.sh"
+      - name: Tools for the kit configure
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build libc6-dev linux-libc-dev
+      - name: libmc++ unit tests
+        run: mcpp test -p modules/graph
+      - name: Build
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          mcpp build -j auto
+          mcpp build -p devtools -j auto
+          mkdir -p stage
+          for exe in mcppls mcppls-conformance mcppls-mock-mcpp mcppls-mock-model mcppls-devtools; do
+            cp "$(find target tools/devtools/target -type f -name "$exe" -path '*/bin/*' | head -1)" stage/
+          done
+          stage/mcppls version
+      - name: Unit tests
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          mcpp test
+          mcpp test --workspace
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FORK }}/.payload-cache
+          key: payload-inputs-linux-x64-${{ hashFiles('forks/mcpp-language-server/packaging/payload.lock.json') }}
+      - name: A payload without clangd
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          stage/mcppls-devtools payload --server stage/mcppls --out payload --cache .payload-cache
+          stage/mcppls-devtools payload --verify payload
+          test ! -e payload/clangd
+          tar -czf mcxx-linux-x64.tar.gz payload stage
+          du -sh payload/* mcxx-linux-x64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcxx-linux-x64
+          path: ${{ env.FORK }}/mcxx-linux-x64.tar.gz
+          retention-days: 7
+
+  conformance:
+    name: conformance (linux-x64, part ${{ matrix.part }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Four parts balanced on measured times (about 150 s of fixtures each).
+        include:
+          - part: 1
+            fixtures: clangd-cannot-load clangd-crash-context cmake-clang compdb-rejected-command diagnostic-bundle failure-at-base generated-module-old-mcpp@neovim inferred inferred-bom mcpp-emit-package-std mcpp-emit-provisioned mcpp-emit-watch@polling mcpp-gcc@plain typing-autosave typing-import typing-import-spin workaround-canaries
+          - part: 2
+            fixtures: compdb-mixed-standards completion-keywords inferred-cxx26 mcpp-emit-broken mcpp-emit-watch mcpp-llvm mcpp-rules-generated mcpp-split mcpp-watch mingw module-faults@zed s1-two-sets watch-polling
+          - part: 3
+            fixtures: build-discovery-off compdb-lto-msvc failure-at-base@vscode generated-module@vscode mcpp-emit mcpp-emit-hang mcpp-emit-needs-download mcpp-emit-partial mcpp-emit-wait mcpp-gcc mcpp-watch@polling multi-root payload-corrupt untrusted
+          - part: 4
+            fixtures: cmake-clang-bdb cmake-fetchcontent-offline engine-none failure-at-base@neovim generated-module generated-module-negotiated generated-module-old-mcpp mcpp-all-cppm mcpp-emit-partial-download mcpp-emit-unavailable mcpp-partition-definition mcpp-split-gcc module-faults verify-changes
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.mcpp/registry/data/xpkgs
+          key: mcxx-fixtures-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ matrix.part }}
+          restore-keys: mcxx-fixtures-xpkgs-${{ runner.os }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: bash .github/scripts/install-mcpp.sh
+      - name: Toolchains the fixtures build with
+        run: |
+          set -euo pipefail
+          case " ${{ matrix.fixtures }} " in *" mcpp-gcc"*|*" mcpp-split-gcc "*|*" mingw "*) mcpp toolchain install gcc 16.1.0 ;; esac
+          sudo apt-get update -q && sudo apt-get install -y -q ninja-build
+      - name: CMake 4.4.2 (cmake-clang-bdb)
+        if: contains(matrix.fixtures, 'cmake-clang-bdb')
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cmake-4.4.2"
+          curl -sfL https://github.com/Kitware/CMake/releases/download/v4.4.2/cmake-4.4.2-linux-x86_64.tar.gz | tar -xz -C "$RUNNER_TEMP/cmake-4.4.2" --strip-components 1
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-linux-x64
+      - name: Unpack
+        run: tar -xzf mcxx-linux-x64.tar.gz && ls payload stage
+      - name: Run the fixtures
+        run: |
+          set -euo pipefail
+          export CONFORMANCE_CLANGXX="$HOME/.mcpp/registry/data/xpkgs/xim-x-llvm/$LLVM_VERSION/bin/clang++"
+          failed=()
+          for spec in ${{ matrix.fixtures }}; do
+            name=${spec%@*}; extra=()
+            case "$spec" in
+              watch-polling|*@polling) extra+=(--no-dynamic-watch) ;;
+              *@plain) extra+=(--plain-client) ;;
+              *@vscode) extra+=(--client vscode) ;;
+              *@neovim) extra+=(--client neovim) ;;
+              *@zed) extra+=(--client zed) ;;
+            esac
+            prefix=''
+            [ "$name" = cmake-clang-bdb ] && prefix="$RUNNER_TEMP/cmake-4.4.2/bin:"
+            echo "::group::$spec"
+            if ! PATH="$prefix$PATH" stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload \
+                   --fixture "conformance/fixtures/$name" --timeout 180 ${extra[@]+"${extra[@]}"}; then
+              failed+=("$spec")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+      # A warm start builds no module (A1.4.4, E-LS-1): mcxx-warm cold, then again with the same
+      # workspace and cache; every module file the second session sees is the one the first left.
+      - name: Cold and warm start
+        if: matrix.part == 1
+        run: |
+          set -euo pipefail
+          warm="$RUNNER_TEMP/warm"
+          rm -rf "$warm"
+          start() {
+            stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload --fixture conformance/fixtures/mcxx-warm \
+                --workspace-dir "$warm/workspace" --cache-dir "$warm/cache" --timeout 180 "$@"
+          }
+          start
+          start --expect-warm
+
+  # A2.3.2: the mcpp repository (the self-mcpp fixture's commit, about 170 modules) opened cold, three
+  # times, a declaration the first request (self-mcpp-first-jump); the first navigation's time since the
+  # server started, and its median. The native engine answers it from the imported interfaces' sources
+  # (M2.3) while the build description is read and the mcxx engine prepares. A2.3.3: the same for
+  # real-xlings and self-mcppls (their -first-jump variants: the fixtures ask for readiness first,
+  # which on the mcxx engine is every module built), whose baselines (the clangd path) are 12.3 s and
+  # 15.1 s. The server logs are kept with the timings.
+  self-mcpp:
+    name: cold starts (linux-x64, mcxx)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - name: mcpp and LLVM
+        run: bash .github/scripts/install-mcpp.sh
+      # What the mcpp repository builds with: GCC 16, and the mcpp its .xlings.json asks for (xlings
+      # runs that one inside it), next to MCPP_VERSION, which stays the default.
+      - name: GCC 16 and the mcpp the mcpp repository asks for
+        run: |
+          set -euo pipefail
+          mcpp toolchain install gcc 16.1.0
+          xlings install mcpp@2026.9.21.1 -y -g
+          xlings use mcpp "$MCPP_VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-linux-x64
+      - name: Unpack
+        run: tar -xzf mcxx-linux-x64.tar.gz
+      - name: Three cold starts of each
+        run: bash .github/scripts/cold-starts.sh stage/mcppls-conformance stage/mcppls payload "$RUNNER_TEMP/self-mcpp"
+      # AS.3.1: the real projects' own fixtures, whole (the -first-jump variants' checks and the rest:
+      # the module graph, the stress), on the mcxx engine.
+      - name: The real projects' own fixtures (AS.3.1)
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          failed=()
+          for fixture in self-mcpp real-xlings self-mcppls; do
+            echo "::group::$fixture"
+            "stage/mcppls-conformance$exe" run --core-engine mcxx --server "stage/mcppls" --payload payload \
+                --fixture "conformance/fixtures/$fixture" --timeout 300 || failed+=("$fixture")
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: self-mcpp-timing
+          path: ${{ runner.temp }}/self-mcpp
+
+  # ---------------------------------------------------------------------------
+  # The other two platforms (M1's exit: A1.4 and A1.8 on mcppls' three). As upstream's ci.yml does,
+  # one Linux host cross-builds the server -- the mcxx engine in it -- for openkal's Windows and macOS
+  # targets; the unit tests are cross-built too and run on the platforms' own runners. The payloads
+  # are assembled (Windows' on Linux, macOS' on a macOS host with the cross-built packaging tool) and
+  # the fixtures run on the platforms themselves.
+  # AS.4.1: MC++'s own compiler as mcpp's toolchain, for the release builds and the self-host job. Built
+  # once from libmc++, assembled in xim:llvm's layout (tools/payload/payload.py, llvm.clang-dev's
+  # generated intrinsics headers among its builtin ones) and handed on: its links point into the LLVM
+  # 22.1.8 payload each consumer installs at the same place.
+  mcxx-toolchain:
+    name: mcxx, the toolchain (linux-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: This fork
+        uses: actions/checkout@v4
+        with:
+          path: forks/mcpp-language-server
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mcxx-toolchain-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+          restore-keys: mcxx-toolchain-${{ runner.os }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: bash "$FORK/.github/scripts/install-mcpp.sh"
+      - name: Build and assemble
+        run: |
+          set -euo pipefail
+          mcpp build -j auto
+          mcxx=$(realpath "$(find target -type f -name mcxx -path '*/bin/*' | head -1)")
+          headers=$(ls -d "$PWD"/.mcpp/.xlings/data/xpkgs/llvm-x-clang-dev/*/*/llvm/clang/lib/Headers | sort -V | tail -1)
+          python3 tools/payload/payload.py --mcxx "$mcxx" --llvm "$HOME/.mcpp/registry/data/xpkgs/xim-x-llvm/$LLVM_VERSION" \
+              --headers "$headers" --out "$RUNNER_TEMP/mcxx-toolchain"
+          test -f "$RUNNER_TEMP/mcxx-toolchain/lib/clang/23/include/arm_neon.h"
+          "$RUNNER_TEMP/mcxx-toolchain/bin/clang++" --version
+          tar -C "$RUNNER_TEMP" -czf mcxx-toolchain.tar.gz mcxx-toolchain
+          du -sh mcxx-toolchain.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcxx-toolchain
+          path: mcxx-toolchain.tar.gz
+          retention-days: 7
+
+  # Release builds, from Linux: the other platforms' cross-built, linux-x64's too (what a release
+  # ships, and what AS.2.2 weighs; the build job's is a dev build, with debug information).
+  cross-build:
+    name: release build from Linux (${{ matrix.target }})
+    needs: mcxx-toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-windows-gnu, exe: '.exe', format: 'PE32+ executable' }
+          - { target: aarch64-macos,      exe: '',     format: 'Mach-O 64-bit arm64' }
+          - { target: x86_64-linux-gnu,   exe: '',     format: 'ELF 64-bit' }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: This fork
+        uses: actions/checkout@v4
+        with:
+          path: forks/mcpp-language-server
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mcxx-cross-${{ matrix.target }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+          restore-keys: mcxx-cross-${{ matrix.target }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: bash "$FORK/.github/scripts/install-mcpp.sh"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-toolchain
+      # Where mcpp looks an llvm toolchain up by version: the assembled payload links into the LLVM
+      # 22.1.8 payload the step before installed, at the same place as where it was assembled.
+      - name: mcxx as mcpp's toolchain llvm@23.1.0-mcxx
+        run: |
+          set -euo pipefail
+          store="$HOME/.mcpp/registry/data/xpkgs"
+          mkdir -p "$store/mcxx-x-mcxx"
+          rm -rf "$store/mcxx-x-mcxx/0.1.0" "$store/mcxx-x-mcxx/mcxx-toolchain"
+          tar -xzf mcxx-toolchain.tar.gz -C "$store/mcxx-x-mcxx"
+          mv "$store/mcxx-x-mcxx/mcxx-toolchain" "$store/mcxx-x-mcxx/0.1.0"
+          ln -sfn "$store/mcxx-x-mcxx/0.1.0" "$store/xim-x-llvm/23.1.0-mcxx"
+          "$store/xim-x-llvm/23.1.0-mcxx/bin/clang++" --version
+      - name: Build for ${{ matrix.target }}
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          # Built by MC++'s compiler (AS.4.1): mcpp says which toolchain it resolved.
+          mcpp build -j auto --profile release --target ${{ matrix.target }} --toolchain llvm@23.1.0-mcxx 2>&1 | tee build.log
+          mcpp build -j auto -p devtools --profile release --target ${{ matrix.target }} --toolchain llvm@23.1.0-mcxx 2>&1 | tee -a build.log
+          grep -q 'Resolved llvm@23.1.0-mcxx' build.log
+          mkdir -p cross
+          for exe in mcppls mcppls-conformance mcppls-mock-mcpp mcppls-mock-model mcppls-devtools; do
+            path=$(ls -t $(find target tools/devtools/target -type f -name "$exe${{ matrix.exe }}" -path '*/${{ matrix.target }}/*/bin/*') | head -1)
+            file "$path" | tee /dev/stderr | grep -q '${{ matrix.format }}'
+            cp "$path" cross/
+          done
+          (cd cross && sha256sum * | tee SHA256SUMS)
+      # Every member's tests, cross-built: bin/<test> of each target directory's newest build.
+      - name: Unit tests, built for ${{ matrix.target }}
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          mcpp test --target ${{ matrix.target }} --no-run --toolchain llvm@23.1.0-mcxx
+          mcpp test --workspace --target ${{ matrix.target }} --no-run --toolchain llvm@23.1.0-mcxx
+          mkdir -p unit
+          for source in tests/*.cpp modules/*/tests/*.cpp tools/*/tests/*.cpp; do
+            [ -f "$source" ] || continue
+            name=$(basename "$source" .cpp)
+            member=${source%/tests/*}; [ "$member" = "$source" ] || [ "$member" = tests ] && member=.
+            built=$(ls -t $(find "$member/target" -type f -name "$name${{ matrix.exe }}" -path '*/${{ matrix.target }}/*/bin/*' 2>/dev/null) 2>/dev/null | head -1 || true)
+            if [ -z "$built" ]; then echo "::error::$source: not built"; exit 1; fi
+            mkdir -p "unit/$member" && cp "$built" "unit/$member/"
+          done
+          find unit -type f | sort
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcxx-cross-${{ matrix.target }}
+          path: |
+            ${{ env.FORK }}/cross
+            ${{ env.FORK }}/unit
+          retention-days: 7
+
+  # MX (any host to any target, mcppls built with mc++): mcxx for the macOS and Windows hosts, cross-built
+  # here as libmc++'s own CI does (its mcxx-cross job), with Clang's builtin headers beside it.
+  mcxx-hosts:
+    name: mcxx for the ${{ matrix.host }} host
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: darwin-arm64, target: aarch64-macos,      exe: mcxx }
+          - { host: win32-x64,    target: x86_64-windows-gnu, exe: mcxx.exe }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mcxx-host-${{ matrix.target }}-${{ env.MCPP_VERSION }}-${{ hashFiles('index/**', '**/mcpp.toml') }}
+          restore-keys: mcxx-host-${{ matrix.target }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do xlings install "mcpp@$MCPP_VERSION" -y -g && break; sleep 20; done
+          mcpp self config --mirror GLOBAL
+          mcpp toolchain install llvm "$LLVM_VERSION"
+          mcpp toolchain default "llvm@$LLVM_VERSION"
+      - name: mcxx for ${{ matrix.host }}
+        run: |
+          set -euo pipefail
+          target=${{ matrix.target }}
+          mcpp build --profile release --target "$target"
+          out="$PWD/mcxx-host"; mkdir -p "$out/headers"
+          cp "$(ls -t $(find "target/$target" -type f -name '${{ matrix.exe }}' -path '*/bin/*') | head -1)" "$out/${{ matrix.exe }}"
+          headers=$(ls -d "$PWD"/.mcpp/.xlings/data/xpkgs/llvm-x-clang-dev/*/*/llvm/clang/lib/Headers | tail -1)
+          cp -R "$headers"/. "$out/headers/"
+          cp "$headers"/../../../../llvm-generated/clang-lib/Headers/* "$out/headers/"
+          ls -la "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcxx-host-${{ matrix.host }}
+          path: mcxx-host
+          retention-days: 7
+
+  # MX: on each host, mc++ installed through libmc++'s xpkg (E-XIM-3) is mcpp's toolchain, and mcppls'
+  # release is built for each target from there -- openkal's cross building: no target SDK, no Xcode
+  # or MSVC used. aarch64-linux-gnu waits for E-OK-3 (compiler-rt's builtins for it in
+  # openkal-llvm-runtime); linux-x64 as a host is the cross-build job above.
+  cross-build-hosts:
+    name: release build from ${{ matrix.host }} (${{ matrix.target }})
+    needs: mcxx-hosts
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [darwin-arm64, win32-x64]
+        target: [x86_64-linux-gnu, aarch64-macos, x86_64-windows-gnu]
+        include:
+          - { host: darwin-arm64, os: macos-14,     mcxx: mcxx }
+          - { host: win32-x64,    os: windows-2022, mcxx: mcxx.exe }
+          - { target: x86_64-linux-gnu,   platform: linux-x64,    exe: '',     magic: '7f454c46' }
+          - { target: aarch64-macos,      platform: darwin-arm64, exe: '',     magic: 'cffaedfe' }
+          - { target: x86_64-windows-gnu, platform: win32-x64,    exe: '.exe', magic: '4d5a' }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: This fork
+        uses: actions/checkout@v4
+        with:
+          path: forks/mcpp-language-server
+      - name: xlings (macOS)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - name: xlings (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://d2learn.org/xlings-install.ps1.txt | iex
+          "$env:USERPROFILE\.xlings\subos\current\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mx-${{ matrix.host }}-${{ matrix.target }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+          restore-keys: mx-${{ matrix.host }}-${{ matrix.target }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do xlings install "mcpp@$MCPP_VERSION" -y -g && break; sleep 20; done
+          mcpp self config --mirror GLOBAL
+          for attempt in 1 2 3; do mcpp toolchain install llvm "$LLVM_VERSION" && break; sleep 20; done
+          mcpp toolchain default "llvm@$LLVM_VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-host-${{ matrix.host }}
+          path: mcxx-host
+      # AX.1: installed through xlings from libmc++'s xpkg, and mcpp lists the toolchain.
+      - name: mc++ as mcpp's toolchain on ${{ matrix.host }}
+        run: |
+          set -euo pipefail
+          chmod +x "mcxx-host/${{ matrix.mcxx }}"
+          py=$(command -v python3 || command -v python)
+          "$py" tools/checks/xlings.py --mcxx "mcxx-host/${{ matrix.mcxx }}" --headers mcxx-host/headers
+      # AX.2, AX.5: built by mc++ for the target, nothing of the target's SDK on this host.
+      - name: mcppls for ${{ matrix.target }}
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          mcpp build -j auto --profile release --target ${{ matrix.target }} --toolchain llvm@23.1.0-mcxx 2>&1 | tee build.log
+          grep -q 'Resolved llvm@23.1.0-mcxx' build.log
+          mkdir -p mx
+          for exe in mcppls mcppls-conformance; do
+            path=$(ls -t $(find target -type f -name "$exe${{ matrix.exe }}" -path '*/${{ matrix.target }}/*/bin/*') | head -1)
+            magic=$(od -An -tx1 -N4 "$path" | tr -d ' \n')
+            echo "$path: $magic"
+            case "$magic" in ${{ matrix.magic }}*) ;; *) echo "::error::$path is not a ${{ matrix.target }} program ($magic)"; exit 1 ;; esac
+            cp "$path" mx/
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mx-${{ matrix.platform }}-from-${{ matrix.host }}
+          path: ${{ env.FORK }}/mx
+          retention-days: 7
+
+  # AX.3 (a first part): what each host built runs on its target and says what it is.
+  run-cross-hosts:
+    name: run on ${{ matrix.platform }} what ${{ matrix.host }} built
+    needs: cross-build-hosts
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [darwin-arm64, win32-x64]
+        platform: [linux-x64, darwin-arm64, win32-x64]
+        include:
+          - { platform: linux-x64,    os: ubuntu-24.04, exe: '' }
+          - { platform: darwin-arm64, os: macos-14,     exe: '' }
+          - { platform: win32-x64,    os: windows-2022, exe: '.exe' }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mx-${{ matrix.platform }}-from-${{ matrix.host }}
+          path: mx
+      - name: It starts and says its version
+        run: |
+          set -euo pipefail
+          chmod +x mx/* || true
+          if [ "$RUNNER_OS" = macOS ]; then for f in mx/*; do codesign -s - -f "$f"; done; fi
+          ./mx/mcppls${{ matrix.exe }} version --json | tee version.json
+          ./mx/mcppls-conformance${{ matrix.exe }} --help | head -5
+
+  # The cross-built tests on the platforms themselves (on Windows, not under wine: the repository
+  # checks there ask git, which a Windows runner has).
+  unit-cross:
+    name: unit tests (${{ matrix.platform }}, cross-built)
+    needs: cross-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: win32-x64,    os: windows-2022, cross: x86_64-windows-gnu }
+          - { platform: darwin-arm64, os: macos-14,     cross: aarch64-macos }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-cross-${{ matrix.cross }}
+          path: built
+      - name: Run them (on macOS signed ad hoc, as whoever ships a program adds)
+        run: |
+          set -euo pipefail
+          failed=()
+          for exe in $(find built/unit -type f | sort); do
+            member=${exe#built/unit/}; member=${member%/*}; [ "$member" = "${exe#built/unit/}" ] && member=.
+            chmod +x "$exe"
+            if [ "$RUNNER_OS" = macOS ]; then codesign -s - -f "$exe"; fi
+            echo "::group::$exe"
+            if ! (cd "$member" && "$GITHUB_WORKSPACE/$exe"); then failed+=("$exe"); fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+
+  payload-cross:
+    name: payload (${{ matrix.platform }}, mcxx)
+    needs: cross-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: win32-x64,    os: ubuntu-24.04, cross: x86_64-windows-gnu, exe: '.exe' }
+          - { platform: darwin-arm64, os: macos-14,     cross: aarch64-macos,      exe: '' }
+          - { platform: linux-x64,    os: ubuntu-24.04, cross: x86_64-linux-gnu,   exe: '' }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mcpp
+        if: runner.os == 'Linux'
+      - name: Build tools for the kit configure
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -q && sudo apt-get install -y -q ninja-build libc6-dev linux-libc-dev; fi
+          if [ "$RUNNER_OS" = macOS ]; then brew install ninja; fi
+          cmake --version | head -1; ninja --version
+      - uses: actions/cache@v4
+        with:
+          path: .payload-cache
+          key: payload-inputs-${{ matrix.platform }}-${{ hashFiles('packaging/payload.lock.json') }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-cross-${{ matrix.cross }}
+          path: built
+      # The packaging tool has to run on THIS host: on macOS the cross-built one; a Linux runner
+      # assembling the Windows payload builds its own (the cross-built one is a .exe).
+      - name: The packaging tool for this host
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            mcpp build -p devtools --profile release
+            cp "$(find tools/devtools/target -type f -name mcppls-devtools -path '*/bin/*' -newer mcpp.toml | head -1)" host-devtools
+          else
+            cp built/cross/mcppls-devtools host-devtools
+          fi
+          chmod +x host-devtools built/cross/*
+          if [ "$RUNNER_OS" = macOS ]; then for f in host-devtools built/cross/*; do [ "${f##*/}" = SHA256SUMS ] || codesign -s - -f "$f"; done; fi
+      - name: Assemble (the server's own engine; no clangd)
+        run: |
+          set -euo pipefail
+          ./host-devtools payload --platform ${{ matrix.platform }} --server "built/cross/mcppls${{ matrix.exe }}" --out payload --cache .payload-cache
+          ./host-devtools payload --verify payload
+          test ! -e payload/clangd
+          mkdir -p stage && cp built/cross/* stage/
+          tar -czf mcxx-${{ matrix.platform }}.tar.gz payload stage
+          du -sh payload/* mcxx-${{ matrix.platform }}.tar.gz
+      # AS.2.2: no larger than the payload before the switch -- upstream's last release with clangd
+      # (v0.0.6) for this platform: unpacked, and as the release archive (the payload alone, gzip).
+      - name: Size against the clangd payload (AS.2.2)
+        run: |
+          set -euo pipefail
+          base=https://github.com/Sunrisepeak/mcpp-language-server/releases/download/v0.0.6
+          curl -fsSL --retry 3 -o before.tar.gz "$base/payload-${{ matrix.platform }}.tar.gz"
+          mkdir -p before && tar -xzf before.tar.gz -C before
+          test -d before/payload/clangd
+          tar -czf after.tar.gz payload
+          size() { if [ "$RUNNER_OS" = macOS ]; then stat -f %z "$1"; else stat -c %s "$1"; fi; }
+          unpacked() { find "$1" -type f -print0 | xargs -0 cat | wc -c | tr -d ' '; }
+          read -r was is packed_was packed_is < <(echo "$(unpacked before/payload) $(unpacked payload) $(size before.tar.gz) $(size after.tar.gz)")
+          { echo "| payload (${{ matrix.platform }}) | v0.0.6, clangd | mcxx |"; echo "|---|---|---|"
+            echo "| unpacked | $was | $is |"; echo "| archive | $packed_was | $packed_is |"; } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$is" -gt "$was" ] || [ "$packed_is" -gt "$packed_was" ]; then echo "::error::the payload is larger than v0.0.6's"; exit 1; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcxx-release-${{ matrix.platform }}
+          path: mcxx-${{ matrix.platform }}.tar.gz
+          retention-days: 7
+
+  # The fixtures upstream runs on these platforms, less the ones for MSVC's toolchain and for
+  # clangd's own failures, with the mcxx engine: the server the payload carries, its engine in it.
+  conformance-cross:
+    name: conformance (${{ matrix.platform }}, mcxx)
+    needs: payload-cross
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            os: macos-14
+            fixtures: inferred inferred-bom build-discovery-off engine-none module-faults untrusted mcpp-llvm mcpp-split mcpp-partition-definition mcpp-all-cppm verify-changes mcpp-watch multi-root failure-at-base failure-at-base@zed generated-module generated-module-old-mcpp generated-module-negotiated typing-import typing-import-spin workaround-canaries completion-keywords diagnostic-bundle typing-autosave mcpp-emit-wait inferred-cxx26
+          - platform: win32-x64
+            os: windows-2022
+            fixtures: inferred inferred-bom build-discovery-off engine-none module-faults untrusted mcpp-split mcpp-partition-definition mcpp-all-cppm verify-changes multi-root mingw mcpp-watch failure-at-base failure-at-base@vscode typing-import typing-import-spin workaround-canaries typing-autosave completion-keywords diagnostic-bundle mcpp-emit-hang mcpp-emit-wait inferred-cxx26
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mcpp
+      - name: Toolchains the fixtures build with
+        run: |
+          set -euo pipefail
+          case " ${{ matrix.fixtures }} " in *" mingw "*) mcpp toolchain install gcc 16.1.0 ;; esac
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-release-${{ matrix.platform }}
+      - name: Unpack
+        run: |
+          tar -xzf mcxx-${{ matrix.platform }}.tar.gz && ls payload stage
+          if [ "$RUNNER_OS" = macOS ]; then for f in stage/* payload/bin/*; do [ -f "$f" ] && [ -x "$f" ] && codesign -s - -f "$f" || true; done; fi
+      - name: Run the fixtures
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          failed=()
+          for spec in ${{ matrix.fixtures }}; do
+            name=${spec%@*}; extra=()
+            case "$spec" in
+              *@vscode) extra+=(--client vscode) ;;
+              *@neovim) extra+=(--client neovim) ;;
+              *@zed) extra+=(--client zed) ;;
+            esac
+            echo "::group::$spec"
+            if ! "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+                   --fixture "conformance/fixtures/$name" --timeout 180 ${extra[@]+"${extra[@]}"}; then
+              failed+=("$spec")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+      # A warm start builds no module (A1.4.4) on this platform too.
+      - name: Cold and warm start
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          warm="$RUNNER_TEMP/warm"
+          start() {
+            "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload --fixture conformance/fixtures/mcxx-warm \
+                --workspace-dir "$warm/workspace" --cache-dir "$warm/cache" --timeout 180 "$@"
+          }
+          start
+          start --expect-warm
+
+  # A2.3.2 and A2.3.3 on the other two platforms (M2's exit: A2.3.2 - A2.3.4 on three; A2.3.4 is the
+  # conformance job's cold and warm start): the same three cold starts of each first-jump fixture, on
+  # the platform's release payload, held to the same limits. The projects' own toolchains here: the
+  # mcpp repository asks for llvm 22.1.8 on macOS and 20.1.7 on Windows, xlings for 20.1.7 on both,
+  # mcpp-language-server for 22.1.8; and the mcpp the mcpp repository's .xlings.json names.
+  cold-starts-cross:
+    name: cold starts (${{ matrix.platform }}, mcxx)
+    needs: payload-cross
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-15, as xlings' own macOS job: on macos-14, mcpp links the build.mcpp of xlings'
+          # mcpplibs.xpkg against the system's libc++, which has no std::print terminal check
+          # (std::__1::__is_posix_terminal), and real-xlings is never prepared.
+          - platform: darwin-arm64
+            os: macos-15
+          - platform: win32-x64
+            os: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mcpp
+      - name: The projects' toolchains, and the mcpp the mcpp repository asks for
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do mcpp toolchain install llvm 20.1.7 && break; sleep 30; done
+          xlings install mcpp@2026.9.21.1 -y -g
+          xlings use mcpp "$MCPP_VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-release-${{ matrix.platform }}
+      - name: Unpack
+        run: |
+          tar -xzf mcxx-${{ matrix.platform }}.tar.gz && ls payload stage
+          if [ "$RUNNER_OS" = macOS ]; then for f in stage/* payload/bin/*; do [ -f "$f" ] && [ -x "$f" ] && codesign -s - -f "$f" || true; done; fi
+      - name: Three cold starts of each
+        run: |
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          bash .github/scripts/cold-starts.sh "stage/mcppls-conformance$exe" "payload/bin/mcppls$exe" payload "$RUNNER_TEMP/cold-starts"
+      # AS.3.1: the real projects' own fixtures, whole (the -first-jump variants' checks and the rest:
+      # the module graph, the stress), on the mcxx engine.
+      - name: The real projects' own fixtures (AS.3.1)
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          failed=()
+          for fixture in self-mcpp real-xlings self-mcppls; do
+            echo "::group::$fixture"
+            "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+                --fixture "conformance/fixtures/$fixture" --timeout 300 || failed+=("$fixture")
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+      # What a failure leaves to read: self-mcppls' cold start once more, the module store and the
+      # index traced (MCXX_LOG, the server at debug), and on macOS the system's crash reports.
+      - name: On a failure, self-mcppls traced, and the crash reports
+        if: failure()
+        run: |
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          out="$RUNNER_TEMP/cold-starts/traced"; mkdir -p "$out"
+          cp -r conformance/fixtures/self-mcppls-first-jump "$RUNNER_TEMP/traced-fixture"
+          py=$(command -v python3 || command -v python)
+          "$py" -c "import json, sys; p = sys.argv[1]; d = json.load(open(p)); d['server-arguments'] = ['--log-level', 'debug']; json.dump(d, open(p, 'w'))" \
+              "$RUNNER_TEMP/traced-fixture/scenario.json"
+          MCXX_LOG=modules=debug,index=debug "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+              --fixture "$RUNNER_TEMP/traced-fixture" --workspace-dir "$RUNNER_TEMP/traced/workspace" --cache-dir "$RUNNER_TEMP/traced/cache" --timeout 300 || true
+          cp "$RUNNER_TEMP/traced/cache/logs/"*.log "$out/" 2>/dev/null || true
+          if [ "$RUNNER_OS" = macOS ]; then
+            for f in ~/Library/Logs/DiagnosticReports/mcppls*; do
+              [ -f "$f" ] || continue
+              cp "$f" "$out/"; echo "::group::$f"; head -150 "$f"; echo "::endgroup::"
+            done
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cold-starts-${{ matrix.platform }}
+          path: ${{ runner.temp }}/cold-starts
+
+  # MS (AS.3.2, AS.3.4): what release-checks.yml asks of a release, on the mcxx engine and its payload
+  # (no clangd), on each platform: five cold and five warm starts of the timing fixture, their medians
+  # of first navigation under 12 s and 5 s; the stability fixtures, three rounds in a row, one failure
+  # in any round a failure. On a push: a pull request's run is the same commit's.
+  release-gates:
+    name: release gates (${{ matrix.platform }}${{ matrix.part && format(', {0}', matrix.part) || '' }}, mcxx)
+    needs: payload-cross
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        # release-checks.yml's stability fixtures and parts; the timing in the first part.
+        include:
+          - platform: linux-x64
+            part: 1 of 2
+            os: ubuntu-24.04
+            timing: true
+            fixtures: mcpp-split multi-root mcpp-llvm mcpp-watch inferred module-faults
+          - platform: linux-x64
+            part: 2 of 2
+            os: ubuntu-24.04
+            fixtures: verify-changes mcpp-all-cppm mcpp-watch@polling mcpp-emit-hang mcpp-emit-watch
+          - platform: darwin-arm64
+            os: macos-14
+            timing: true
+            fixtures: inferred module-faults verify-changes multi-root mcpp-llvm mcpp-split mcpp-all-cppm mcpp-watch
+          - platform: win32-x64
+            part: 1 of 2
+            os: windows-2022
+            timing: true
+            fixtures: mcpp-split inferred module-faults mcpp-watch
+          - platform: win32-x64
+            part: 2 of 2
+            os: windows-2022
+            fixtures: verify-changes mcpp-all-cppm multi-root mcpp-emit-hang
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-mcpp
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-release-${{ matrix.platform }}
+      - name: Unpack
+        run: |
+          tar -xzf mcxx-${{ matrix.platform }}.tar.gz && ls payload stage
+          if [ "$RUNNER_OS" = macOS ]; then for f in stage/* payload/bin/*; do [ -f "$f" ] && [ -x "$f" ] && codesign -s - -f "$f" || true; done; fi
+      - name: Five cold and warm starts (AS.3.2)
+        if: matrix.timing
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          results="$RUNNER_TEMP/timing"
+          rm -rf "$results"; mkdir -p "$results"
+          for round in 1 2 3 4 5; do
+            for start in cold warm; do
+              warm=(); [ "$start" = warm ] && warm=(--expect-warm)
+              "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+                  --fixture conformance/fixtures/timing \
+                  --workspace-dir "$RUNNER_TEMP/timing-$round/workspace" --cache-dir "$RUNNER_TEMP/timing-$round/cache" \
+                  --timeout 120 --measure "$results/$start-$round.json" ${warm[@]+"${warm[@]}"}
+            done
+          done
+          "stage/mcppls-devtools$exe" measure summary "$results" --max-cold 12 --max-warm 5 \
+              | tee "$results/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Three rounds (AS.3.4)
+        run: |
+          set -euo pipefail
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          failed=''
+          for round in 1 2 3; do
+            for spec in ${{ matrix.fixtures }}; do
+              name=${spec%@*}; extra=()
+              case "$spec" in *@polling) extra+=(--no-dynamic-watch) ;; esac
+              echo "::group::round $round: $spec"
+              started=$(date +%s)
+              if ! "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+                     --fixture "conformance/fixtures/$name" --timeout 180 ${extra[@]+"${extra[@]}"}; then
+                failed="$failed round-$round:$spec"
+              fi
+              echo "::endgroup::"
+              echo "round $round $spec $(( $(date +%s) - started )) s" | tee -a "$RUNNER_TEMP/stability.txt"
+            done
+          done
+          { echo "| round | fixture | seconds |"; echo "|---|---|---|"
+            awk '{ printf "| %s | %s | %s |\n", $2, $3, $4 }' "$RUNNER_TEMP/stability.txt"; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$failed" ]; then echo "::error::failed:$failed"; exit 1; fi
+      # What a failure leaves to read: verify-changes once more, when this row runs it, with the module
+      # store and the index traced (MCXX_LOG, the server at debug); the logs into an artifact.
+      - name: On a failure, verify-changes traced
+        if: failure() && contains(matrix.fixtures, 'verify-changes')
+        run: |
+          exe=''; [ "$RUNNER_OS" = Windows ] && exe='.exe'
+          cp -r conformance/fixtures/verify-changes "$RUNNER_TEMP/traced-fixture"
+          py=$(command -v python3 || command -v python)
+          "$py" -c "import json, sys; p = sys.argv[1]; d = json.load(open(p)); d['server-arguments'] = ['--log-level', 'debug']; json.dump(d, open(p, 'w'))" \
+              "$RUNNER_TEMP/traced-fixture/scenario.json"
+          MCXX_LOG=modules=debug,index=debug "stage/mcppls-conformance$exe" run --core-engine mcxx --server "payload/bin/mcppls$exe" --payload payload \
+              --fixture "$RUNNER_TEMP/traced-fixture" --workspace-dir "$RUNNER_TEMP/traced/workspace" --cache-dir "$RUNNER_TEMP/traced/cache" --timeout 180 || true
+      - uses: actions/upload-artifact@v4
+        if: failure() && contains(matrix.fixtures, 'verify-changes')
+        with:
+          name: release-gates-traced-${{ matrix.platform }}${{ matrix.part && format('-{0}', matrix.part == '1 of 2' && '1' || '2') || '' }}
+          path: ${{ runner.temp }}/traced/cache/logs
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.timing
+        with:
+          name: mcxx-timing-${{ matrix.platform }}
+          path: ${{ runner.temp }}/timing
+
+  # MS (AS.4.1, AS.4.2): mcppls built by MC++'s own compiler. The mcxx-toolchain job's payload is mcpp's
+  # `llvm@23.1.0-mcxx` toolchain here (libmc++'s CI installs the same through its xpkg, E-XL-1); this
+  # fork is built with it -- each program then says which compiler made it -- and its own tests (one
+  # program at a time: a dev test program is some 220 MB) and the linux-x64 fixtures run on what it
+  # built. The release builds use it too (cross-build), and so everything the other jobs run on.
+  self-host:
+    name: built by mcxx (linux-x64)
+    needs: mcxx-toolchain
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: libmc++
+        uses: actions/checkout@v4
+        with:
+          repository: Sunrisepeak/mcpp-safe
+          ref: ${{ inputs.mcpp-safe-ref || 'main' }}
+      - name: This fork
+        uses: actions/checkout@v4
+        with:
+          path: forks/mcpp-language-server
+      - name: xlings
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mcpp/registry/data/xpkgs
+            ~/.mcpp/build-cache
+          key: mcxx-selfhost-${{ runner.os }}-${{ env.MCPP_VERSION }}-${{ hashFiles('**/mcpp.toml') }}
+          restore-keys: mcxx-selfhost-${{ runner.os }}-${{ env.MCPP_VERSION }}-
+      - name: mcpp and LLVM
+        run: bash "$FORK/.github/scripts/install-mcpp.sh"
+      - name: Tools for the kit configure
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build libc6-dev linux-libc-dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcxx-toolchain
+      - name: mcxx as mcpp's toolchain llvm@23.1.0-mcxx
+        run: |
+          set -euo pipefail
+          store="$HOME/.mcpp/registry/data/xpkgs"
+          mkdir -p "$store/mcxx-x-mcxx"
+          rm -rf "$store/mcxx-x-mcxx/0.1.0" "$store/mcxx-x-mcxx/mcxx-toolchain"
+          tar -xzf mcxx-toolchain.tar.gz -C "$store/mcxx-x-mcxx"
+          mv "$store/mcxx-x-mcxx/mcxx-toolchain" "$store/mcxx-x-mcxx/0.1.0"
+          ln -sfn "$store/mcxx-x-mcxx/0.1.0" "$store/xim-x-llvm/23.1.0-mcxx"
+          "$store/xim-x-llvm/23.1.0-mcxx/bin/clang++" --version
+      - name: This fork, built with mcxx
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          mcpp build -j auto --toolchain llvm@23.1.0-mcxx
+          mcpp build -p devtools -j auto --toolchain llvm@23.1.0-mcxx
+          mkdir -p stage
+          for exe in mcppls mcppls-conformance mcppls-mock-mcpp mcppls-mock-model mcppls-devtools; do
+            cp "$(ls -t $(find target tools/devtools/target -type f -name "$exe" -path '*/bin/*') | head -1)" stage/
+          done
+          # What made them: MC++'s compiler (Clang 23.1 in mcxx), not the LLVM 22 toolchain.
+          for exe in stage/*; do readelf -p .comment "$exe" | tee /dev/stderr | grep -q 'clang version 23\.1'; done
+          stage/mcppls version
+      - name: Its tests, built with mcxx
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          failed=()
+          for t in $(ls tests/*.cpp | xargs -n1 basename | sed 's/\.cpp$//'); do
+            echo "::group::$t"
+            mcpp test --toolchain llvm@23.1.0-mcxx "$t" || failed+=("$t")
+            find target -path '*/bin/*' -name "$t" -type f -delete
+            echo "::endgroup::"
+          done
+          mcpp test --workspace --toolchain llvm@23.1.0-mcxx || failed+=(workspace)
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.FORK }}/.payload-cache
+          key: payload-inputs-linux-x64-${{ hashFiles('forks/mcpp-language-server/packaging/payload.lock.json') }}
+      - name: The fixtures, on what mcxx built
+        working-directory: ${{ env.FORK }}
+        run: |
+          set -euo pipefail
+          stage/mcppls-devtools payload --server stage/mcppls --out payload --cache .payload-cache
+          stage/mcppls-devtools payload --verify payload
+          # mcpp-gcc and mcpp-split-gcc describe their projects with GCC, as the conformance parts install it.
+          mcpp toolchain install gcc 16.1.0
+          export CONFORMANCE_CLANGXX="$HOME/.mcpp/registry/data/xpkgs/xim-x-llvm/$LLVM_VERSION/bin/clang++"
+          failed=()
+          # The linux-x64 conformance job's four parts, one after the other.
+          for spec in $(python3 -c "import yaml; print(' '.join(i['fixtures'] for i in yaml.safe_load(open('.github/workflows/mcxx.yml'))['jobs']['conformance']['strategy']['matrix']['include']))"); do
+            name=${spec%@*}; extra=()
+            case "$spec" in
+              watch-polling|*@polling) extra+=(--no-dynamic-watch) ;;
+              *@plain) extra+=(--plain-client) ;;
+              *@vscode) extra+=(--client vscode) ;;
+              *@neovim) extra+=(--client neovim) ;;
+              *@zed) extra+=(--client zed) ;;
+            esac
+            [ "$name" = cmake-clang-bdb ] && continue   # needs the CMake the conformance job installs
+            echo "::group::$spec"
+            stage/mcppls-conformance run --core-engine mcxx --server stage/mcppls --payload payload \
+                --fixture "conformance/fixtures/$name" --timeout 180 ${extra[@]+"${extra[@]}"} || failed+=("$spec")
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then echo "::error::failed: ${failed[*]}"; exit 1; fi

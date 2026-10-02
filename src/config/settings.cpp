@@ -118,11 +118,13 @@ const std::vector<Setting>& shipped_registry() {
         },
         // ---- Engines ------------------------------------------------------------------------
         Setting {
-            .key = "engine", .kind = Kind::enumeration, .values = { "clangd", "none" }, .defaultValue = "clangd",
+            .key = "engine", .kind = Kind::enumeration, .values = { "mcxx", "clangd", "none" }, .defaultValue = "mcxx",
             .commandLine = "--engine", .surface = Surface::server, .applies = Applies::restart, .category = "engines", .since = "0.0.1",
-            .summary = "The core semantic engine. mcppls's own module engine always runs beside it; `none` means module-level "
+            .summary = "The core semantic engine: `mcxx` is libmc++ in process (Clang 23.1 as a library, no clangd), `clangd` "
+                       "drives a clangd process. mcppls's own module engine always runs beside it; `none` means module-level "
                        "features only.",
-            .summaryZh = "核心引擎。无论如何，mcppls 自己的模块引擎都会运行；`none` 表示只提供模块相关功能。",
+            .summaryZh = "核心引擎：`mcxx` 为进程内的 libmc++（以库的方式使用 Clang 23.1，不需要 clangd），`clangd` 驱动一个 clangd "
+                         "进程。无论如何，mcppls 自己的模块引擎都会运行；`none` 表示只提供模块相关功能。",
             .clientConfigurable = true,
         },
         Setting {

@@ -156,8 +156,12 @@ std::vector<InterfaceDeclaration> exported_named(query::View& view, std::string_
 
 query::Outcome<query::Symbols> locate_symbols(query::View& view, const query::SymbolTarget& target, query::Limit limit, bool describe,
                                               query::Clock::time_point deadline) {
-    auto found = query::find_symbols(view, target, limit, describe, deadline);
     const bool byName { !target.name.empty() && target.id.empty() && target.line == 0 };
+    // Without a core engine, a module's exported declaration is described best by the interface
+    // summary (its signature, documentation, module); the outline of MC++'s own front end (M1.8)
+    // answers for what is not exported.
+    const bool summary_first { byName && !view.has_core_engine() && !exported_named(view, target.name).empty() };
+    auto found = summary_first ? query::Outcome<query::Symbols> { query::Symbols {} } : query::find_symbols(view, target, limit, describe, deadline);
     const bool nothing { found ? found->symbols.empty() : found.error().code == "unavailable" };
     if (!byName || !nothing) return found;
     query::Symbols symbols;

@@ -1,5 +1,6 @@
 {
   "name": "workaround-canaries",
+  "only-engine": ["clangd"],
   "description": "Import-hang plan \u00a79: each registered clangd workaround's defect, run against the payload's clangd. A check here failing means an update of clangd fixed the defect, and the workaround it names can be removed (src/engine/clangd/workarounds.cpp).",
   "server-arguments": [
     "--no-discover"

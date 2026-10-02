@@ -1,0 +1,74 @@
+{
+  "name": "self-mcpp-first-jump",
+  "description": "A2.3.2: the mcpp repository at self-mcpp's commit, opened cold, and a declaration asked for as the first request -- a cold start's first jump, answered by the native engine (MC++'s own front end over the sources of the interfaces src/main.cpp imports) while the build description is still being read. Then the rest of self-mcpp's checks, so that the server is otherwise what it is. Its first-navigation is what the mcxx workflow's self-mcpp job times.",
+  "prepare": [
+    [
+      "git",
+      "init",
+      "-q"
+    ],
+    [
+      "git",
+      "fetch",
+      "-q",
+      "--depth",
+      "1",
+      "https://github.com/mcpp-community/mcpp",
+      "d1f1c98fa26d953e084a183a9672fc1e0ce63558"
+    ],
+    [
+      "git",
+      "checkout",
+      "-q",
+      "FETCH_HEAD"
+    ],
+    [
+      "mcpp",
+      "emit",
+      "build-database"
+    ]
+  ],
+  "checks": [
+    {
+      "id": "C2-cli-run",
+      "kind": "declaration",
+      "file": "src/main.cpp",
+      "at": [
+        29,
+        25
+      ],
+      "expect": "src/cli.cppm"
+    },
+    {
+      "id": "C2-ui",
+      "kind": "declaration",
+      "file": "src/main.cpp",
+      "at": [
+        25,
+        16
+      ],
+      "expect": "src/ui.cppm"
+    },
+    {
+      "id": "S1",
+      "kind": "status",
+      "source": "mcpp",
+      "state": "ready"
+    },
+    {
+      "id": "C1-main",
+      "kind": "diagnostics-empty",
+      "file": "src/main.cpp"
+    },
+    {
+      "id": "C5-module",
+      "kind": "definition",
+      "file": "src/main.cpp",
+      "at": [
+        4,
+        9
+      ],
+      "expect": "src/cli.cppm"
+    }
+  ]
+}

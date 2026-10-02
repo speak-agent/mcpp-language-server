@@ -1,0 +1,15 @@
+// On Linux, the version script that keeps Clang's and LLVM's names out of what mcppls offers an MC4
+// plugin library: libmc++'s own (mcpp-safe/src/exports.map, beside this fork in mcpp-safe/forks/).
+// mcpp resolves a package-relative path only for -L and -rpath, so it is named absolutely here.
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+int main() {
+    const char* os = std::getenv("MCPP_TARGET_OS");
+    const char* dir = std::getenv("MCPP_MANIFEST_DIR");
+    if (os != nullptr && std::string(os) == "linux" && dir != nullptr)
+        std::printf("mcpp:link-flag=-Wl,--version-script=%s/../../src/exports.map\n", dir);
+    std::puts("mcpp:rerun-if-changed=../../src/exports.map");
+    return 0;
+}

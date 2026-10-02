@@ -4,6 +4,7 @@ import std;
 import mcppls.base.text;
 import mcppls.base.path;
 import mcppls.spec.database;
+import mcxx.frontend;
 
 namespace mcppls::project {
 
@@ -27,164 +28,71 @@ base::Position position_in(std::string_view text, std::size_t offset) {
     return base::position_at(text.substr(mark), offset < mark ? 0 : offset - mark);
 }
 
-// Offsets are the text's own; a byte order mark before `export module` is skipped like white space
-// (fix plan F2), or the declaration would not begin its line and the file would be no module.
+// The text as MC++'s own lexer reads it (mcxx.frontend, token for token Clang's raw lexer: comments,
+// literals of every kind, raw strings, line splices, a byte order mark): the tokens outside comments
+// and preprocessor directives, each saying whether it starts its logical line. Offsets are the text's
+// own; the directives' #if nesting is counted, not evaluated -- a declaration in any branch is
+// reported, marked conditional.
 class Lexer {
 private:
     std::string_view text_;
+    std::vector<mcxx::frontend::Token> tokens_;
     std::size_t at_ { 0 };
-    bool lineStart_ { true };
     int conditionalDepth_ { 0 };
 
 public:
-    explicit Lexer(std::string_view text) : text_ { text }, at_ { base::byte_order_mark_size(text) } {}
+    explicit Lexer(std::string_view text) : text_ { text }, tokens_ { mcxx::frontend::lex(text) } {}
 
     int conditional_depth() const { return conditionalDepth_; }
 
     // The next token outside comments, literals' interiors and preprocessor directives.
     std::optional<Token> next(bool wantHeaderName) {
-        while (at_ < text_.size()) {
-            const char c { text_[at_] };
-            if (c == '\n') {
-                lineStart_ = true;
-                ++at_;
+        using K = mcxx::frontend::Kind;
+        while (at_ < tokens_.size()) {
+            const auto& t = tokens_[at_];
+            if (t.start_of_line && t.kind == K::hash) {
+                // A directive, to the end of its logical line.
+                std::size_t end { at_ + 1 };
+                const std::string_view name { end < tokens_.size() && !tokens_[end].start_of_line && tokens_[end].kind == K::raw_identifier
+                                                  ? text_.substr(tokens_[end].begin, tokens_[end].end - tokens_[end].begin)
+                                                  : std::string_view {} };
+                if (name == "if" || name == "ifdef" || name == "ifndef") ++conditionalDepth_;
+                if (name == "endif" && conditionalDepth_ > 0) --conditionalDepth_;
+                while (end < tokens_.size() && !tokens_[end].start_of_line) ++end;
+                at_ = end;
                 continue;
             }
-            if (is_space(c)) {
-                ++at_;
-                continue;
-            }
-            if (c == '\\' && at_ + 1 < text_.size() && (text_[at_ + 1] == '\n' || text_[at_ + 1] == '\r')) {
-                at_ += 2;
-                continue;
-            }
-            if (c == '/' && at_ + 1 < text_.size() && text_[at_ + 1] == '/') {
-                skip_line_comment_();
-                continue;
-            }
-            if (c == '/' && at_ + 1 < text_.size() && text_[at_ + 1] == '*') {
-                const std::size_t end { text_.find("*/", at_ + 2) };
-                at_ = end == std::string_view::npos ? text_.size() : end + 2;
-                continue;
-            }
-            if (c == '#' && lineStart_) {
-                directive_();
-                continue;
-            }
-            const bool startsLine { lineStart_ };
-            lineStart_ = false;
-            const std::size_t begin { at_ };
-
-            if (wantHeaderName && c == '<') {
-                const std::size_t close { text_.find_first_of(">\n", at_ + 1) };
-                if (close != std::string_view::npos && text_[close] == '>') {
+            if (wantHeaderName && t.kind == K::less) {
+                // <header>: to its `>` on the same line.
+                std::size_t close { at_ + 1 };
+                while (close < tokens_.size() && !tokens_[close].start_of_line && tokens_[close].kind != K::greater) ++close;
+                if (close < tokens_.size() && !tokens_[close].start_of_line) {
                     at_ = close + 1;
-                    return Token { TokenKind::header_name, text_.substr(begin, at_ - begin), begin, startsLine };
+                    return Token { TokenKind::header_name, text_.substr(t.begin, tokens_[close].end - t.begin), t.begin, t.start_of_line };
                 }
-            }
-            if (c == 'R' && at_ + 1 < text_.size() && text_[at_ + 1] == '"') {
-                raw_string_(at_ + 1);
-                return Token { TokenKind::string, text_.substr(begin, at_ - begin), begin, startsLine };
-            }
-            if (c == '"') {
-                quoted_('"');
-                return Token { TokenKind::string, text_.substr(begin, at_ - begin), begin, startsLine };
-            }
-            if (c == '\'') {
-                quoted_('\'');
-                return Token { TokenKind::other, text_.substr(begin, at_ - begin), begin, startsLine };
-            }
-            if (base::is_identifier_start(c)) {
-                while (at_ < text_.size() && base::is_identifier_char(text_[at_])) ++at_;
-                // An identifier directly followed by a quote is an encoding prefix (u8"x").
-                if (at_ < text_.size() && (text_[at_] == '"' || text_[at_] == '\'')) {
-                    const std::string_view prefix { text_.substr(begin, at_ - begin) };
-                    if (prefix == "u8" || prefix == "u" || prefix == "U" || prefix == "L") {
-                        quoted_(text_[at_]);
-                        return Token { TokenKind::string, text_.substr(begin, at_ - begin), begin, startsLine };
-                    }
-                    if (prefix == "u8R" || prefix == "uR" || prefix == "UR" || prefix == "LR") {
-                        raw_string_(at_);
-                        return Token { TokenKind::string, text_.substr(begin, at_ - begin), begin, startsLine };
-                    }
-                }
-                return Token { TokenKind::identifier, text_.substr(begin, at_ - begin), begin, startsLine };
-            }
-            if (c >= '0' && c <= '9') {
-                // pp-number, including digit separators (1'000) and exponents.
-                ++at_;
-                while (at_ < text_.size()) {
-                    const char d { text_[at_] };
-                    if (base::is_identifier_char(d) || d == '.') {
-                        ++at_;
-                    } else if (d == '\'' && at_ + 1 < text_.size() && base::is_identifier_char(text_[at_ + 1])) {
-                        at_ += 2;
-                    } else if ((d == '+' || d == '-') && (text_[at_ - 1] == 'e' || text_[at_ - 1] == 'E' || text_[at_ - 1] == 'p' || text_[at_ - 1] == 'P')) {
-                        ++at_;
-                    } else {
-                        break;
-                    }
-                }
-                return Token { TokenKind::other, text_.substr(begin, at_ - begin), begin, startsLine };
             }
             ++at_;
-            return Token { TokenKind::punctuation, text_.substr(begin, 1), begin, startsLine };
+            const std::string_view spelled { text_.substr(t.begin, t.end - t.begin) };
+            TokenKind kind { TokenKind::punctuation };
+            switch (t.kind) {
+            case K::raw_identifier: kind = TokenKind::identifier; break;
+            case K::string_literal:
+            case K::wide_string_literal:
+            case K::utf8_string_literal:
+            case K::utf16_string_literal:
+            case K::utf32_string_literal: kind = TokenKind::string; break;
+            case K::numeric_constant:
+            case K::char_constant:
+            case K::wide_char_constant:
+            case K::utf8_char_constant:
+            case K::utf16_char_constant:
+            case K::utf32_char_constant:
+            case K::unknown: kind = TokenKind::other; break;
+            default: break;
+            }
+            return Token { kind, spelled, t.begin, t.start_of_line };
         }
         return std::nullopt;
-    }
-
-private:
-    void skip_line_comment_() {
-        while (at_ < text_.size() && text_[at_] != '\n') {
-            if (text_[at_] == '\\' && at_ + 1 < text_.size() && text_[at_ + 1] == '\n') ++at_;
-            ++at_;
-        }
-    }
-
-    void quoted_(char quote) {
-        ++at_;
-        while (at_ < text_.size() && text_[at_] != quote && text_[at_] != '\n') {
-            if (text_[at_] == '\\' && at_ + 1 < text_.size()) ++at_;
-            ++at_;
-        }
-        if (at_ < text_.size() && text_[at_] == quote) ++at_;
-    }
-
-    // `quoteAt` indexes the opening quote of R"delim( ... )delim".
-    void raw_string_(std::size_t quoteAt) {
-        const std::size_t open { text_.find('(', quoteAt + 1) };
-        if (open == std::string_view::npos || open - quoteAt - 1 > 16) {
-            at_ = quoteAt;
-            quoted_('"');
-            return;
-        }
-        const std::string terminator { std::format("){}\"", text_.substr(quoteAt + 1, open - quoteAt - 1)) };
-        const std::size_t close { text_.find(terminator, open + 1) };
-        at_ = close == std::string_view::npos ? text_.size() : close + terminator.size();
-    }
-
-    void directive_() {
-        std::size_t cursor { at_ + 1 };
-        while (cursor < text_.size() && is_space(text_[cursor])) ++cursor;
-        std::size_t nameEnd { cursor };
-        while (nameEnd < text_.size() && base::is_identifier_char(text_[nameEnd])) ++nameEnd;
-        const std::string_view name { text_.substr(cursor, nameEnd - cursor) };
-        if (name == "if" || name == "ifdef" || name == "ifndef") ++conditionalDepth_;
-        if (name == "endif" && conditionalDepth_ > 0) --conditionalDepth_;
-        // The directive runs to the end of its logical line; comments inside it end with it.
-        while (at_ < text_.size() && text_[at_] != '\n') {
-            if (text_[at_] == '\\' && at_ + 1 < text_.size() && (text_[at_ + 1] == '\n' || text_[at_ + 1] == '\r')) {
-                at_ += text_[at_ + 1] == '\r' && at_ + 2 < text_.size() && text_[at_ + 2] == '\n' ? 3 : 2;
-                continue;
-            }
-            if (text_[at_] == '/' && at_ + 1 < text_.size() && text_[at_ + 1] == '*') {
-                const std::size_t end { text_.find("*/", at_ + 2) };
-                at_ = end == std::string_view::npos ? text_.size() : end + 2;
-                continue;
-            }
-            ++at_;
-        }
-        lineStart_ = true;
     }
 };
 

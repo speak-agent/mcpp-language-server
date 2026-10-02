@@ -44,7 +44,7 @@ either wrapped in a top-level `mcppls` object or not.
 
 | Setting | Values | Default | Command line | Applies | What it does |
 |---|---|---|---|---|---|
-| `mcppls.engine` | `clangd`, `none` | `clangd` | `--engine` | restart | The core semantic engine. mcppls's own module engine always runs beside it; `none` means module-level features only. |
+| `mcppls.engine` | `mcxx`, `clangd`, `none` | `mcxx` | `--engine` | restart | The core semantic engine: `mcxx` is libmc++ in process (Clang 23.1 as a library, no clangd), `clangd` drives a clangd process. mcppls's own module engine always runs beside it; `none` means module-level features only. |
 | `mcppls.compiler` | a string | *(empty)* | `--compiler` | reload | Use this compiler for module semantics instead of what was detected: an absolute path, a name on `PATH`, or `kit` to force the bundled semantic kit. Empty means discovered automatically. |
 | `mcppls.semanticKit` | `auto`, `off` | `auto` | `--semantic-kit` | reload | Whether the bundled standard library kit may be used at all: `auto`, when no compiler is found; `off`, never (without a compiler, only module-level features remain). |
 | `mcppls.requestTimeout` | a non-negative number of seconds | `60` | `--request-timeout` | restart | How long an engine request may take before it is answered without the engine. A request a person waits for (hover, definition, completion and the like) waits at most 30s in all, including while clangd starts or prepares its modules, and is then answered by mcppls's own engine. |

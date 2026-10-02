@@ -15,6 +15,7 @@ import mcppls.platform.toolrun;
 import mcppls.base.sha256;
 import mcppls.spec.kit;
 import mcppls.engine.clangd.process;
+import mcppls.engine.mcxx;
 
 namespace mcppls::engine {
 
@@ -134,10 +135,13 @@ PayloadPaths resolve_payload(const PayloadRequest& requested) {
         paths.clangd = absolute(request.clangd);
         paths.clangdVersion.clear();
     }
-    if (paths.clangd.empty()) {
+    // The mcxx engine runs in process: a clangd on PATH is nobody's business then, and asking one
+    // its version is a process start for nothing.
+    const bool inProcess { request.engine == mcxx::ENGINE_ID };
+    if (paths.clangd.empty() && !inProcess) {
         if (auto found = platform::env::find_executable("clangd")) paths.clangd = *found;
     }
-    if (paths.clangdVersion.empty() && !paths.clangd.empty() && platform::fs::is_regular_file(paths.clangd)) {
+    if (paths.clangdVersion.empty() && !inProcess && !paths.clangd.empty() && platform::fs::is_regular_file(paths.clangd)) {
         if (auto result = platform::toolrun::run({ .program = paths.clangd, .arguments = { "--version" },
                                                    .purpose = "engine-version",
                                                    .bounds = platform::RunBounds { .hard = std::chrono::seconds { 20 } } });
@@ -148,7 +152,10 @@ PayloadPaths resolve_payload(const PayloadRequest& requested) {
 
     // The kit that matches the core engine (S4-4-5): an explicit --kit is taken as given; otherwise
     // the payload's when its libc++ is the engine's version, else that version installed by xlings.
-    const std::string wanted { request.engine == "none" || paths.clangdVersion.empty() ? std::string {} : paths.clangdVersion };
+    const std::string wanted { request.engine == "none"  ? std::string {}
+                               : inProcess                ? mcxx::kit_stdlib_version()
+                                                          : paths.clangdVersion };
+    const std::string engineName { inProcess ? std::string { mcxx::ENGINE_ID } : std::format("clangd {}", paths.clangdVersion) };
     if (!request.kit.empty()) {
         const std::string kit { absolute(request.kit) };
         if (platform::fs::is_regular_file(base::join_path(kit, "kit.json"))) paths.kit = kit;
@@ -164,8 +171,8 @@ PayloadPaths resolve_payload(const PayloadRequest& requested) {
         }
         if (paths.kit.empty()) paths.kit = installed_kit(wanted);
         if (paths.kit.empty() && !mismatch.empty()) {
-            paths.kitNotice = std::format("the semantic kit carries libc++ {}, but clangd {} needs libc++ {}; install mcppls-kit {}", mismatch,
-                                          paths.clangdVersion, wanted, wanted);
+            paths.kitNotice = std::format("the semantic kit carries libc++ {}, but {} needs libc++ {}; install mcppls-kit {}", mismatch,
+                                          engineName, wanted, wanted);
         }
     }
     return paths;
