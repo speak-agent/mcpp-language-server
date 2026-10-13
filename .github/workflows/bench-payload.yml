@@ -6,7 +6,6 @@ name: bench payload (win32-x64, mcxx)
 # pinned at the revision of the last run where every mcxx.yml job passed (run 36945780086).
 
 on:
-  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -179,7 +178,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: mcxx-cross-${{ matrix.cross }}
-          path: built
+          path: built/cross
       # The packaging tool has to run on THIS host: on macOS the cross-built one; a Linux runner
       # assembling the Windows payload builds its own (the cross-built one is a .exe).
       - name: The packaging tool for this host
