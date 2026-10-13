@@ -8,7 +8,6 @@ name: mcxx
 on:
   push:
     branches: [mcxx-engine]
-  pull_request:
   workflow_dispatch:
     inputs:
       mcpp-safe-ref:
